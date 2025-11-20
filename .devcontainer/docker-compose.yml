@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  server:
+    image: golang:1.25
+    command: sleep infinity
+    volumes:
+      # Update this to wherever you want VS Code to mount the folder of your project
+      - ..:/workspaces:cached
+
+    # Uncomment the next four lines if you will use a ptrace-based debugger like C++, Go, and Rust.
+    # cap_add:
+    #   - SYS_PTRACE
+    # security_opt:
+    #   - seccomp:unconfined
+
+    # Overrides default command so things don't shut down after the process ends.
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - rabbitmq
+      - minio
+    environment:
+      - DB_URL=postgres://user:password@postgres:5432/videodb?sslmode=disable
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - S3_ENDPOINT=minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET=videos
+      - S3_USE_SSL=false
+    networks:
+      - video-net
+
+networks:
+  video-net:
+    driver: bridge
+    external: true
+    name: devcontainer_default

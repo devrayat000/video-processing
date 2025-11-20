@@ -1,0 +1,69 @@
+services:
+  # 1. The Database (Metadata)
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: videodb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - video-net
+
+  # 2. The Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: always
+    ports:
+      - "5672:5672" # AMQP protocol
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - video-net
+
+  # 3. Object Storage (S3 Compatible)
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    restart: always
+    ports:
+      - "9000:9000" # API port
+      - "9001:9001" # Console UI
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    networks:
+      - video-net
+
+  # 4. Setup Service (Optional helper to create the default bucket automatically)
+  minio-create-bucket:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb myminio/videos;
+      /usr/bin/mc anonymous set download myminio/videos;
+      exit 0;
+      "
+    networks:
+      - video-net
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  video-net:
+    driver: bridge
+    external: true
+    name: devcontainer_default
