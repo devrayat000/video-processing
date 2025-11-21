@@ -1,5 +1,5 @@
 # Base stage for building
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
@@ -23,8 +23,5 @@ RUN apk add --no-cache ffmpeg ca-certificates
 # Copy binaries from builder
 COPY --from=builder /app/bin/api /app/api
 COPY --from=builder /app/bin/worker /app/worker
-
-# Create a directory for temporary video processing
-RUN mkdir -p /tmp/processing
 
 # We don't set an ENTRYPOINT here because we will define it in docker-compose
