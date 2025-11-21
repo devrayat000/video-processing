@@ -1,5 +1,6 @@
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { Upload } from "@aws-sdk/lib-storage";
 
 // Configure S3 client with environment variables
 const createS3Client = () => {
@@ -16,6 +17,8 @@ const createS3Client = () => {
 
   return new S3Client({
     region: region || "us-east-1",
+    endpoint: "http://localhost:9000",
+    forcePathStyle: true,
     credentials:
       accessKeyId && secretAccessKey
         ? {
@@ -71,4 +74,70 @@ export const hasAwsCredentials = (): boolean => {
     import.meta.env.VITE_AWS_ACCESS_KEY_ID &&
     import.meta.env.VITE_AWS_SECRET_ACCESS_KEY
   );
+};
+
+/**
+ * Get the configured S3 bucket name from environment variables
+ */
+export const getS3Bucket = (): string => {
+  const bucket = import.meta.env.VITE_AWS_S3_BUCKET;
+  if (!bucket) {
+    throw new Error(
+      "S3 bucket not configured. Please set VITE_AWS_S3_BUCKET in your .env file"
+    );
+  }
+  return bucket;
+};
+
+/**
+ * Upload a file to S3 using multipart upload
+ * @param file - The file to upload
+ * @param key - The S3 key (path) where the file will be stored
+ * @param onProgress - Optional callback for upload progress (0-100)
+ * @returns The S3 URL of the uploaded file
+ */
+export const uploadFileToS3 = async (
+  file: File,
+  key: string,
+  onProgress?: (progress: number) => void
+): Promise<string> => {
+  if (!hasAwsCredentials()) {
+    throw new Error(
+      "AWS credentials not configured. Please set up your .env file."
+    );
+  }
+
+  const bucket = getS3Bucket();
+
+  try {
+    const upload = new Upload({
+      client: s3Client,
+      params: {
+        Bucket: bucket,
+        Key: key,
+        Body: file,
+        ContentType: file.type,
+      },
+      // Multipart upload configuration
+      queueSize: 4, // Number of concurrent uploads
+      partSize: 5 * 1024 * 1024, // 5MB per part (minimum allowed by S3)
+      leavePartsOnError: false, // Clean up on error
+    });
+
+    // Track upload progress
+    upload.on("httpUploadProgress", (progress) => {
+      if (onProgress && progress.loaded && progress.total) {
+        const percentage = Math.round((progress.loaded / progress.total) * 100);
+        onProgress(percentage);
+      }
+    });
+
+    await upload.done();
+
+    // Return the S3 URL
+    return `http://localhost:9000/${bucket}/${key}`;
+  } catch (error) {
+    console.error("Failed to upload file to S3:", error);
+    throw error;
+  }
 };

@@ -1,149 +1,253 @@
-import { useActionState, useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { toast } from 'sonner'
-import { useNavigate } from 'react-router'
+import { useState } from "react";
+import { toast } from "sonner";
+import { useNavigate } from "react-router";
+import { Upload, X, FileVideo, CheckCircle2 } from "lucide-react";
+import {
+  Dropzone,
+  DropZoneArea,
+  DropzoneDescription,
+  DropzoneFileList,
+  DropzoneFileListItem,
+  DropzoneMessage,
+  DropzoneRemoveFile,
+  DropzoneRetryFile,
+  DropzoneTrigger,
+  InfiniteProgress,
+  useDropzone,
+} from "@/components/ui/dropzone";
+import { uploadFileToS3 } from "@/lib/s3";
 
-const API_BASE_URL = 'http://localhost:8080'
+const API_BASE_URL = "http://localhost:8080";
 
 const safeUUID = () =>
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+  typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
-    : `video-${Math.random().toString(36).slice(2, 9)}`
+    : `video-${Math.random().toString(36).slice(2, 9)}`;
 
-type JobForm = {
-  videoId: string
-  originalName: string
-  s3Path: string
-}
+type UploadResult = {
+  videoId: string;
+  s3Path: string;
+  originalName: string;
+};
 
-const defaultFormState = (): JobForm => ({
-  videoId: safeUUID(),
-  originalName: '',
-  s3Path: '',
-})
+type UploadError = string;
 
-// Server action for submitting jobs
-async function submitJob(_prevState: { error?: string; success?: boolean; videoId?: string } | null, formData: FormData) {
-  const videoId = formData.get('videoId') as string
-  const originalName = formData.get('originalName') as string
-  const s3Path = formData.get('s3Path') as string
+const formatFileSize = (bytes: number): string => {
+  if (bytes === 0) return "0 Bytes";
+  const k = 1024;
+  const sizes = ["Bytes", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
+};
 
-  if (!originalName || !s3Path) {
-    return { error: 'Original name and S3 path are required.' }
-  }
+export default function VideoUpload() {
+  const navigate = useNavigate();
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>(
+    {}
+  );
 
-  try {
+  // Submit job to backend after upload
+  const submitJobToBackend = async (
+    videoId: string,
+    originalName: string,
+    s3Path: string
+  ) => {
     const response = await fetch(`${API_BASE_URL}/jobs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         video_id: videoId,
         original_name: originalName,
         s3_path: s3Path,
       }),
-    })
+    });
 
     if (!response.ok) {
-      const message = await response.text()
-      throw new Error(message || 'Failed to submit job')
+      const message = await response.text();
+      throw new Error(message || "Failed to submit job");
     }
 
-    const result = await response.json()
-    toast.success(`Job ${result.id || videoId} queued successfully.`)
-    return { success: true, videoId: result.id || videoId }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Failed to submit job'
-    toast.error(errorMessage)
-    return { error: errorMessage }
-  }
-}
+    const result = await response.json();
+    return result.id || videoId;
+  };
 
-export default function VideoUpload() {
-  const navigate = useNavigate()
-  const [jobForm, setJobForm] = useState<JobForm>(defaultFormState)
-  const [formState, formAction, isPending] = useActionState(submitJob, null)
+  const dropzone = useDropzone<UploadResult, UploadError>({
+    validation: {
+      accept: {
+        "video/*": [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"],
+      },
+      maxSize: 5 * 1024 * 1024 * 1024, // 5GB
+      maxFiles: 5,
+    },
+    onDropFile: async (file) => {
+      const videoId = safeUUID();
+      const timestamp = Date.now();
+      const key = `${videoId}/${timestamp}-${file.name}`;
 
-  const handleInputChange = (field: keyof JobForm) => (event: React.ChangeEvent<HTMLInputElement>) => {
-    setJobForm((prev) => ({ ...prev, [field]: event.target.value }))
-  }
+      try {
+        // Upload file to S3 with progress tracking
+        const s3Path = await uploadFileToS3(file, key, (progress) => {
+          setUploadProgress((prev) => ({ ...prev, [videoId]: progress }));
+        });
 
-  const regenerateVideoId = () => {
-    setJobForm((prev) => ({ ...prev, videoId: safeUUID() }))
-  }
+        // Submit job to backend
+        const jobId = await submitJobToBackend(videoId, file.name, s3Path);
 
-  // Navigate to video details on success
-  if (formState?.success && formState.videoId) {
-    setTimeout(() => {
-      navigate(`/videos/${formState.videoId}`)
-    }, 1000)
-  }
+        toast.success(`Video uploaded and job ${jobId} queued successfully!`);
+
+        return {
+          status: "success",
+          result: {
+            videoId: jobId,
+            s3Path,
+            originalName: file.name,
+          },
+        };
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Upload failed";
+        toast.error(errorMessage);
+        return {
+          status: "error",
+          error: errorMessage,
+        };
+      } finally {
+        // Clean up progress tracking
+        setUploadProgress((prev) => {
+          const next = { ...prev };
+          delete next[videoId];
+          return next;
+        });
+      }
+    },
+    onFileUploaded: (result) => {
+      // Navigate to video details after a short delay
+      setTimeout(() => {
+        navigate(`/videos/${result.videoId}`);
+      }, 2000);
+    },
+    maxRetryCount: 3,
+    autoRetry: false,
+  });
 
   return (
     <main className="max-w-4xl mx-auto py-8 px-4">
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2">Upload Video</h1>
         <p className="text-muted-foreground">
-          Submit a video processing job by providing the S3 path to your video file.
+          Upload video files directly to S3 and automatically queue them for
+          processing.
         </p>
       </div>
 
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Submit a processing job</h2>
-            <p>Provide a globally unique ID and the S3 object that should be processed by the backend.</p>
+      <Dropzone {...dropzone}>
+        <div className="panel">
+          <div className="space-y-6">
+            <DropZoneArea className="min-h-[200px] flex-col gap-4">
+              <FileVideo className="h-12 w-12 text-muted-foreground" />
+              <div className="text-center">
+                <p className="text-lg font-medium">Drop video files here</p>
+                <DropzoneDescription>
+                  or click the button below to browse
+                </DropzoneDescription>
+              </div>
+              <DropzoneTrigger>
+                <Upload className="mr-2 h-4 w-4 inline" />
+                Browse Files
+              </DropzoneTrigger>
+              <p className="text-xs text-muted-foreground text-center">
+                Supported formats: MP4, MOV, AVI, MKV, WebM, FLV, WMV (Max 5GB
+                per file, up to 5 files)
+              </p>
+            </DropZoneArea>
+
+            <DropzoneMessage />
+
+            {dropzone.fileStatuses.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="font-semibold">
+                  Uploads ({dropzone.fileStatuses.length})
+                </h3>
+                <DropzoneFileList>
+                  {dropzone.fileStatuses.map((file) => {
+                    const progress = uploadProgress[file.id] || 0;
+                    const isPending = file.status === "pending";
+                    const isSuccess = file.status === "success";
+                    const isError = file.status === "error";
+
+                    return (
+                      <DropzoneFileListItem key={file.id} file={file}>
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-2">
+                              {isSuccess && (
+                                <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                              )}
+                              {isError && (
+                                <X className="h-4 w-4 text-destructive shrink-0" />
+                              )}
+                              <p className="font-medium truncate">
+                                {file.fileName}
+                              </p>
+                            </div>
+                            <p className="text-sm text-muted-foreground mb-2">
+                              {formatFileSize(file.file.size)}
+                              {isPending &&
+                                progress > 0 &&
+                                ` • ${progress}% uploaded`}
+                              {isSuccess && " • Upload complete"}
+                            </p>
+                            {isPending && (
+                              <InfiniteProgress
+                                status="pending"
+                                className="mb-2"
+                              />
+                            )}
+                            {isSuccess && (
+                              <InfiniteProgress
+                                status="success"
+                                className="mb-2"
+                              />
+                            )}
+                            {isError && (
+                              <InfiniteProgress
+                                status="error"
+                                className="mb-2"
+                              />
+                            )}
+                          </div>
+                          <div className="flex gap-2 shrink-0">
+                            {isError && dropzone.canRetry(file.id) && (
+                              <DropzoneRetryFile />
+                            )}
+                            {!isPending && <DropzoneRemoveFile />}
+                          </div>
+                        </div>
+                      </DropzoneFileListItem>
+                    );
+                  })}
+                </DropzoneFileList>
+              </div>
+            )}
           </div>
-          <Button type="button" variant="outline" size="sm" onClick={regenerateVideoId}>
-            Generate ID
-          </Button>
         </div>
-        <form className="job-form" action={formAction}>
-          <div className="form-field">
-            <Label htmlFor="videoId">Video ID</Label>
-            <Input
-              id="videoId"
-              name="videoId"
-              value={jobForm.videoId}
-              onChange={handleInputChange('videoId')}
-              required
-            />
-            <span className="hint">Must be unique per job. Prefilled for convenience.</span>
-          </div>
-          <div className="form-field">
-            <Label htmlFor="originalName">Original file name</Label>
-            <Input
-              id="originalName"
-              name="originalName"
-              value={jobForm.originalName}
-              placeholder="eg. corporate_reel.mov"
-              onChange={handleInputChange('originalName')}
-              required
-            />
-          </div>
-          <div className="form-field">
-            <Label htmlFor="s3Path">S3 path</Label>
-            <Input
-              id="s3Path"
-              name="s3Path"
-              value={jobForm.s3Path}
-              placeholder="s3://bucket/key/video.mov"
-              onChange={handleInputChange('s3Path')}
-              required
-            />
-            <span className="hint">The worker pulls bytes directly from this URI.</span>
-          </div>
-          <div className="form-actions">
-            <Button type="submit" disabled={isPending}>
-              {isPending ? 'Queuing...' : 'Queue job'}
-            </Button>
-          </div>
-          {formState?.error && (
-            <p className="text-sm text-destructive mt-2">{formState.error}</p>
-          )}
-        </form>
+      </Dropzone>
+
+      <div className="mt-6 p-4 border rounded-lg bg-muted/50">
+        <h3 className="font-semibold mb-2">How it works</h3>
+        <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
+          <li>Select or drop video files into the upload area</li>
+          <li>
+            Files are uploaded directly to S3 using secure multipart upload
+          </li>
+          <li>
+            A processing job is automatically created for each uploaded video
+          </li>
+          <li>
+            You'll be redirected to the video details page to track progress
+          </li>
+        </ol>
       </div>
     </main>
-  )
+  );
 }
