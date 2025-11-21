@@ -1,0 +1,73 @@
+services:
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    pull_policy: build
+    command: /app/api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: videodb
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: videos
+      S3_USE_SSL: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - video-net
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    pull_policy: build
+    command: /app/worker
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: videodb
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: videos
+      S3_USE_SSL: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      api:
+        condition: service_started
+    networks:
+      - video-net
+
+networks:
+  video-net:
+    driver: bridge
+    external: true
+    name: devcontainer_default
