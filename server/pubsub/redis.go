@@ -81,6 +81,12 @@ func EnqueueJob(job models.VideoJob) error {
 
 // ConsumeJobs reads jobs from the Redis stream and processes them
 func ConsumeJobs(ctx context.Context, handler func(models.VideoJob) error) error {
+	// First, process any pending messages from previous runs
+	if err := processPendingMessages(ctx, handler); err != nil {
+		log.Printf("Warning: Error processing pending messages: %v", err)
+	}
+
+	// Then start consuming new messages
 	for {
 		select {
 		case <-ctx.Done():
@@ -107,28 +113,77 @@ func ConsumeJobs(ctx context.Context, handler func(models.VideoJob) error) error
 
 			for _, stream := range streams {
 				for _, message := range stream.Messages {
-					job, err := parseJob(message.Values)
-					if err != nil {
-						log.Printf("Error parsing job: %v", err)
-						// Acknowledge anyway to prevent reprocessing bad messages
-						RedisClient.XAck(ctx, VideoJobsStream, ConsumerGroup, message.ID)
-						continue
-					}
-
-					log.Printf("Processing job: video_id=%s, message_id=%s", job.VideoID, message.ID)
-
-					// Process the job
-					if err := handler(job); err != nil {
-						log.Printf("Error processing job %s: %v", job.VideoID, err)
-						// Job will be retried by pending messages consumer
-					} else {
-						// Acknowledge successful processing
-						RedisClient.XAck(ctx, VideoJobsStream, ConsumerGroup, message.ID)
-						log.Printf("Job completed and acknowledged: video_id=%s", job.VideoID)
-					}
+					processMessage(ctx, message, handler)
 				}
 			}
 		}
+	}
+}
+
+// processPendingMessages handles messages that were enqueued but not yet processed
+func processPendingMessages(ctx context.Context, handler func(models.VideoJob) error) error {
+	log.Println("Checking for pending messages...")
+
+	// Get pending messages for this consumer
+	pending, err := RedisClient.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: VideoJobsStream,
+		Group:  ConsumerGroup,
+		Start:  "-",
+		End:    "+",
+		Count:  100,
+	}).Result()
+
+	if err != nil {
+		return fmt.Errorf("failed to get pending messages: %w", err)
+	}
+
+	if len(pending) > 0 {
+		log.Printf("Found %d pending messages, processing...", len(pending))
+	}
+
+	for _, p := range pending {
+		// Claim the message for this consumer
+		messages, err := RedisClient.XClaim(ctx, &redis.XClaimArgs{
+			Stream:   VideoJobsStream,
+			Group:    ConsumerGroup,
+			Consumer: ConsumerName,
+			MinIdle:  0,
+			Messages: []string{p.ID},
+		}).Result()
+
+		if err != nil {
+			log.Printf("Error claiming message %s: %v", p.ID, err)
+			continue
+		}
+
+		for _, message := range messages {
+			processMessage(ctx, message, handler)
+		}
+	}
+
+	return nil
+}
+
+// processMessage processes a single message from the stream
+func processMessage(ctx context.Context, message redis.XMessage, handler func(models.VideoJob) error) {
+	job, err := parseJob(message.Values)
+	if err != nil {
+		log.Printf("Error parsing job: %v", err)
+		// Acknowledge anyway to prevent reprocessing bad messages
+		RedisClient.XAck(ctx, VideoJobsStream, ConsumerGroup, message.ID)
+		return
+	}
+
+	log.Printf("Processing job: video_id=%s, message_id=%s", job.VideoID, message.ID)
+
+	// Process the job
+	if err := handler(job); err != nil {
+		log.Printf("Error processing job %s: %v", job.VideoID, err)
+		// Job will be retried on next worker restart or manual intervention
+	} else {
+		// Acknowledge successful processing
+		RedisClient.XAck(ctx, VideoJobsStream, ConsumerGroup, message.ID)
+		log.Printf("Job completed and acknowledged: video_id=%s", job.VideoID)
 	}
 }
 

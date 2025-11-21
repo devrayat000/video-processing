@@ -60,26 +60,37 @@ func CompleteVideo(videoID string) error {
 }
 
 // CreateResolution inserts a new resolution record
-func CreateResolution(res *models.Resolution) error {
+func CreateResolution(res *models.VideoResolution) error {
 	if res.ID == "" {
 		res.ID = uuid.New().String()
 	}
 
 	query := `
-		INSERT INTO resolutions (id, video_id, height, width, s3_key, s3_url, file_size, bitrate, processed_at)
+		INSERT INTO resolutions (id, video_id, resolution, playlist_s3_key, playlist_url, segment_count, total_size, bandwidth, processed_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 	_, err := DB.Exec(query,
 		res.ID,
 		res.VideoID,
-		res.Height,
-		res.Width,
-		res.S3Key,
-		res.S3URL,
-		res.FileSize,
-		res.Bitrate,
+		res.Resolution,
+		res.PlaylistS3Key,
+		res.PlaylistURL,
+		res.SegmentCount,
+		res.TotalSize,
+		res.Bandwidth,
 		res.ProcessedAt,
 	)
+	return err
+}
+
+// UpdateMasterPlaylist updates the master playlist URLs for a video
+func UpdateMasterPlaylist(videoID, playlistKey, playlistURL string) error {
+	query := `
+		UPDATE videos 
+		SET master_playlist_key = $1, master_playlist_url = $2, updated_at = $3
+		WHERE id = $4
+	`
+	_, err := DB.Exec(query, playlistKey, playlistURL, time.Now(), videoID)
 	return err
 }
 
@@ -119,8 +130,8 @@ func GetVideo(videoID string) (*models.Video, error) {
 
 	// Get resolutions
 	resQuery := `
-		SELECT id, video_id, height, width, s3_key, s3_url, file_size, bitrate, processed_at
-		FROM resolutions WHERE video_id = $1 ORDER BY height DESC
+		SELECT id, video_id, resolution, playlist_s3_key, playlist_url, segment_count, total_size, bandwidth, processed_at
+		FROM resolutions WHERE video_id = $1 ORDER BY bandwidth DESC
 	`
 
 	rows, err := DB.Query(resQuery, videoID)
@@ -130,8 +141,8 @@ func GetVideo(videoID string) (*models.Video, error) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var res models.Resolution
-		if err := rows.Scan(&res.ID, &res.VideoID, &res.Height, &res.Width, &res.S3Key, &res.S3URL, &res.FileSize, &res.Bitrate, &res.ProcessedAt); err != nil {
+		var res models.VideoResolution
+		if err := rows.Scan(&res.ID, &res.VideoID, &res.Resolution, &res.PlaylistS3Key, &res.PlaylistURL, &res.SegmentCount, &res.TotalSize, &res.Bandwidth, &res.ProcessedAt); err != nil {
 			continue
 		}
 		video.Resolutions = append(video.Resolutions, res)

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,15 @@ var (
 	s3Secret   = os.Getenv("S3_SECRET_KEY")
 	s3Bucket   = os.Getenv("S3_BUCKET")
 )
+
+// ResolutionInfo holds metadata about a processed resolution for master playlist generation
+type ResolutionInfo struct {
+	Resolution   string
+	Bandwidth    int
+	PlaylistKey  string
+	SegmentCount int
+	TotalSize    int64
+}
 
 func main() {
 	// 0. Initialize Database and Redis
@@ -144,6 +154,9 @@ func processVideoStreaming(mc *minio.Client, job models.VideoJob) error {
 		Timestamp:        time.Now(),
 	})
 
+	// Track resolution info for master playlist
+	var resolutionInfos []ResolutionInfo
+
 	// Process each resolution
 	for i, res := range resolutions {
 		progressPercent := 5 + ((i * 90) / len(resolutions))
@@ -158,7 +171,8 @@ func processVideoStreaming(mc *minio.Client, job models.VideoJob) error {
 			Timestamp:         time.Now(),
 		})
 
-		if err := transcodeResolution(ctx, mc, job, res, metadata.Width); err != nil {
+		resInfo, err := transcodeToHLS(ctx, mc, job, res, metadata.Width, metadata.Height)
+		if err != nil {
 			errMsg := fmt.Sprintf("failed to transcode %dp: %v", res, err)
 			db.UpdateVideoStatus(job.VideoID, models.StatusFailed, errMsg)
 			pubsub.PublishProgress(models.ProcessingProgress{
@@ -170,7 +184,16 @@ func processVideoStreaming(mc *minio.Client, job models.VideoJob) error {
 			})
 			return fmt.Errorf("%s", errMsg)
 		}
-		log.Printf(" [√] Completed %dp for video_id=%s", res, job.VideoID)
+
+		resolutionInfos = append(resolutionInfos, resInfo)
+		log.Printf(" [√] Completed %dp HLS for video_id=%s", res, job.VideoID)
+	}
+
+	// Generate and upload master playlist
+	if err := generateAndUploadMasterPlaylist(ctx, mc, job.VideoID, resolutionInfos); err != nil {
+		log.Printf(" [!] Failed to generate master playlist: %v", err)
+		db.UpdateVideoStatus(job.VideoID, models.StatusFailed, err.Error())
+		return err
 	}
 
 	// Mark as completed
@@ -271,9 +294,21 @@ func getTargetResolutions(sourceHeight int) []int {
 	return targets
 }
 
-// transcodeResolution transcodes a single resolution
-func transcodeResolution(ctx context.Context, mc *minio.Client, job models.VideoJob, height, sourceWidth int) error {
-	// Calculate width maintaining aspect ratio (will be handled by FFmpeg's scale=-2)
+// transcodeToHLS transcodes a single resolution to HLS format
+func transcodeToHLS(ctx context.Context, mc *minio.Client, job models.VideoJob, height, sourceWidth, sourceHeight int) (ResolutionInfo, error) {
+	// Create temporary directory for HLS output
+	tempDir := fmt.Sprintf("/tmp/hls_%s_%dp_%d", job.VideoID, height, time.Now().UnixNano())
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return ResolutionInfo{}, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir) // Clean up after upload
+
+	playlistPath := fmt.Sprintf("%s/playlist.m3u8", tempDir)
+	segmentPattern := fmt.Sprintf("%s/segment_%%03d.ts", tempDir)
+
+	// Determine audio bitrate based on resolution
+	audioBitrate := getAudioBitrate(height)
+
 	args := []string{
 		"-y",
 		"-fflags", "+discardcorrupt",
@@ -283,75 +318,211 @@ func transcodeResolution(ctx context.Context, mc *minio.Client, job models.Video
 		"-preset", "ultrafast",
 		"-crf", "23",
 		"-c:a", "aac",
-		"-b:a", "128k",
-		"-movflags", "frag_keyframe+empty_moov",
-		"-f", "mp4",
-		"pipe:1",
+		"-b:a", fmt.Sprintf("%dk", audioBitrate),
+		"-f", "hls",
+		"-hls_time", "10",
+		"-hls_playlist_type", "vod",
+		"-hls_segment_type", "mpegts",
+		"-hls_segment_filename", segmentPattern,
+		"-hls_flags", "independent_segments",
+		"-start_number", "0",
+		playlistPath,
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	log.Printf(" [>] Running: ffmpeg (transcoding to %dp)", height)
-
-	ffmpegStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe error: %w", err)
-	}
+	log.Printf(" [>] Running: ffmpeg (transcoding to %dp HLS)", height)
 
 	ffmpegStderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("stderr pipe error: %w", err)
+		return ResolutionInfo{}, fmt.Errorf("stderr pipe error: %w", err)
 	}
 
 	// Monitor FFmpeg progress in background
 	go monitorFFmpegProgress(ffmpegStderr, job.VideoID, height)
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("ffmpeg start error: %w", err)
+	if err := cmd.Run(); err != nil {
+		return ResolutionInfo{}, fmt.Errorf("ffmpeg execution error: %w", err)
 	}
 
-	// Upload to MinIO
-	processedKey := fmt.Sprintf("processed/%s_%dp.mp4", job.VideoID, height)
-	log.Printf(" [>] Uploading to bucket=%s key=%s", s3Bucket, processedKey)
+	// Upload all segment files to S3
+	segmentFiles, err := os.ReadDir(tempDir)
+	if err != nil {
+		return ResolutionInfo{}, fmt.Errorf("failed to read temp dir: %w", err)
+	}
 
-	uploadInfo, err := mc.PutObject(ctx, s3Bucket, processedKey, ffmpegStdout, -1, minio.PutObjectOptions{
-		ContentType: "video/mp4",
+	var totalSize int64
+	segmentCount := 0
+
+	for _, file := range segmentFiles {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".ts") {
+			continue
+		}
+
+		segmentPath := fmt.Sprintf("%s/%s", tempDir, file.Name())
+		s3Key := fmt.Sprintf("%s/processed/%dp/%s", job.VideoID, height, file.Name())
+
+		// Open and upload segment file
+		segmentFile, err := os.Open(segmentPath)
+		if err != nil {
+			return ResolutionInfo{}, fmt.Errorf("failed to open segment %s: %w", file.Name(), err)
+		}
+
+		fileInfo, err := segmentFile.Stat()
+		if err != nil {
+			segmentFile.Close()
+			return ResolutionInfo{}, fmt.Errorf("failed to stat segment: %w", err)
+		}
+
+		uploadInfo, err := mc.PutObject(ctx, s3Bucket, s3Key, segmentFile, fileInfo.Size(), minio.PutObjectOptions{
+			ContentType: "video/mp2t",
+		})
+		segmentFile.Close()
+
+		if err != nil {
+			return ResolutionInfo{}, fmt.Errorf("S3 upload error for %s: %w", file.Name(), err)
+		}
+
+		totalSize += uploadInfo.Size
+		segmentCount++
+		log.Printf(" [>] Uploaded segment %s (%d bytes)", file.Name(), uploadInfo.Size)
+	}
+
+	// Upload playlist file
+	playlistS3Key := fmt.Sprintf("%s/processed/%dp/playlist.m3u8", job.VideoID, height)
+	playlistFile, err := os.Open(playlistPath)
+	if err != nil {
+		return ResolutionInfo{}, fmt.Errorf("failed to open playlist: %w", err)
+	}
+	defer playlistFile.Close()
+
+	playlistInfo, err := playlistFile.Stat()
+	if err != nil {
+		return ResolutionInfo{}, fmt.Errorf("failed to stat playlist: %w", err)
+	}
+
+	_, err = mc.PutObject(ctx, s3Bucket, playlistS3Key, playlistFile, playlistInfo.Size(), minio.PutObjectOptions{
+		ContentType: "application/vnd.apple.mpegurl",
 	})
 	if err != nil {
-		return fmt.Errorf("S3 upload error: %w", err)
+		return ResolutionInfo{}, fmt.Errorf("playlist upload error: %w", err)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg execution error: %w", err)
-	}
+	totalSize += playlistInfo.Size()
+	log.Printf(" [>] Uploaded playlist for %dp", height)
 
-	// Generate presigned URL (valid for 7 days)
-	presignedURL, err := mc.PresignedGetObject(ctx, s3Bucket, processedKey, 7*24*time.Hour, nil)
+	// Generate presigned URL for playlist (valid for 7 days)
+	presignedURL, err := mc.PresignedGetObject(ctx, s3Bucket, playlistS3Key, 7*24*time.Hour, nil)
 	if err != nil {
 		log.Printf(" [!] Failed to generate presigned URL: %v", err)
 	}
 
-	// Calculate actual width from aspect ratio
-	calculatedWidth := (sourceWidth * height) / sourceWidth
-	if calculatedWidth%2 != 0 {
-		calculatedWidth--
-	}
+	// Estimate bandwidth
+	bandwidth := estimateBandwidth(height)
 
 	// Save resolution to database
-	resolution := &models.Resolution{
-		ID:          uuid.New().String(),
-		VideoID:     job.VideoID,
-		Height:      height,
-		Width:       calculatedWidth,
-		S3Key:       processedKey,
-		S3URL:       presignedURL.String(),
-		FileSize:    uploadInfo.Size,
-		ProcessedAt: time.Now(),
+	resolution := &models.VideoResolution{
+		ID:            uuid.New().String(),
+		VideoID:       job.VideoID,
+		Resolution:    fmt.Sprintf("%dp", height),
+		PlaylistS3Key: playlistS3Key,
+		PlaylistURL:   presignedURL.String(),
+		SegmentCount:  segmentCount,
+		TotalSize:     totalSize,
+		Bandwidth:     bandwidth,
+		ProcessedAt:   time.Now(),
 	}
 
 	if err := db.CreateResolution(resolution); err != nil {
 		log.Printf(" [!] Failed to save resolution to database: %v", err)
 	}
 
+	return ResolutionInfo{
+		Resolution:   fmt.Sprintf("%dp", height),
+		Bandwidth:    bandwidth,
+		PlaylistKey:  playlistS3Key,
+		SegmentCount: segmentCount,
+		TotalSize:    totalSize,
+	}, nil
+}
+
+func estimateBandwidth(height int) int {
+	bandwidthMap := map[int]int{
+		2160: 8000000, // 8 Mbps for 4K
+		1440: 6000000, // 6 Mbps for 1440p
+		1080: 5000000, // 5 Mbps for 1080p
+		720:  2800000, // 2.8 Mbps for 720p
+		480:  1400000, // 1.4 Mbps for 480p
+		360:  800000,  // 800 Kbps for 360p
+		240:  500000,  // 500 Kbps for 240p
+		144:  300000,  // 300 Kbps for 144p
+	}
+
+	if bw, exists := bandwidthMap[height]; exists {
+		return bw
+	}
+	return height * 2500 // Estimate based on height
+}
+
+// getAudioBitrate returns the appropriate audio bitrate for a given resolution
+// Following YouTube's standards: higher resolutions get better audio quality
+func getAudioBitrate(height int) int {
+	switch {
+	case height >= 1080:
+		return 192 // 192 kbps for 1080p and above
+	case height >= 720:
+		return 160 // 160 kbps for 720p
+	case height >= 480:
+		return 128 // 128 kbps for 480p
+	default:
+		return 96 // 96 kbps for 360p and below
+	}
+}
+
+func generateAndUploadMasterPlaylist(ctx context.Context, mc *minio.Client, videoID string, resolutions []ResolutionInfo) error {
+	// Sort resolutions by bandwidth descending
+	sort.Slice(resolutions, func(i, j int) bool {
+		return resolutions[i].Bandwidth > resolutions[j].Bandwidth
+	})
+
+	// Generate master playlist content
+	var builder strings.Builder
+	builder.WriteString("#EXTM3U\n")
+	builder.WriteString("#EXT-X-VERSION:3\n\n")
+
+	for _, res := range resolutions {
+		builder.WriteString(fmt.Sprintf(
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,NAME=\"%s\"\n",
+			res.Bandwidth, res.Resolution,
+		))
+		builder.WriteString(fmt.Sprintf("%s/playlist.m3u8\n\n", res.Resolution))
+	}
+
+	// Upload master playlist
+	masterKey := fmt.Sprintf("%s/processed/master.m3u8", videoID)
+	content := builder.String()
+
+	_, err := mc.PutObject(ctx, s3Bucket, masterKey,
+		strings.NewReader(content), int64(len(content)),
+		minio.PutObjectOptions{
+			ContentType: "application/vnd.apple.mpegurl",
+		})
+
+	if err != nil {
+		return fmt.Errorf("failed to upload master playlist: %w", err)
+	}
+
+	// Generate presigned URL
+	masterURL, err := mc.PresignedGetObject(ctx, s3Bucket, masterKey, 7*24*time.Hour, nil)
+	if err != nil {
+		log.Printf(" [!] Failed to generate master playlist URL: %v", err)
+	}
+
+	// Update video record
+	if err := db.UpdateMasterPlaylist(videoID, masterKey, masterURL.String()); err != nil {
+		log.Printf(" [!] Failed to update master playlist in DB: %v", err)
+	}
+
+	log.Printf(" [√] Master playlist uploaded: %s", masterKey)
 	return nil
 }
 
