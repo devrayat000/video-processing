@@ -41,6 +41,7 @@ func createTables() error {
 		id VARCHAR(255) PRIMARY KEY,
 		original_name VARCHAR(500) NOT NULL,
 		s3_path TEXT NOT NULL,
+		encoded_url TEXT,
 		status VARCHAR(50) NOT NULL DEFAULT 'pending',
 		source_height INTEGER DEFAULT 0,
 		source_width INTEGER DEFAULT 0,
@@ -55,8 +56,7 @@ func createTables() error {
 	CREATE TABLE IF NOT EXISTS resolutions (
 		id VARCHAR(255) PRIMARY KEY,
 		video_id VARCHAR(255) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
-		height INTEGER NOT NULL,
-		width INTEGER NOT NULL,
+		resolution TEXT NOT NULL,
 		s3_key TEXT NOT NULL,
 		s3_url TEXT NOT NULL,
 		file_size BIGINT DEFAULT 0,

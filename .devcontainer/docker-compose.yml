@@ -42,7 +42,10 @@ services:
       - video-net
   client:
     image: oven/bun:latest
-    command: sleep infinity
+    command: |
+      bash -c "
+      apt update && apt install -y git && sleep infinity
+      "
     volumes:
       - ..:/workspaces:cached
     ports:
