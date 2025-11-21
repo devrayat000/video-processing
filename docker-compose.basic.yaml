@@ -13,19 +13,27 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - video-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # 2. The Message Queue
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
-    restart: always
+  # 2. Redis for message queue, caching and pub/sub
+  redis:
+    image: redis:latest
+    command: redis-server --appendonly yes
     ports:
-      - "5672:5672" # AMQP protocol
-      - "15672:15672" # Management UI
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
     networks:
       - video-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 3. Object Storage (S3 Compatible)
   minio:
@@ -42,6 +50,11 @@ services:
       - minio_data:/data
     networks:
       - video-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 4. Setup Service (Optional helper to create the default bucket automatically)
   minio-create-bucket:
@@ -61,6 +74,7 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  redis_data:
 
 networks:
   video-net:

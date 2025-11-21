@@ -1,60 +1,30 @@
-// package api
-
 package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
+	"strconv"
 	"time"
 
+	"github.com/devrayat000/video-process/db"
+	"github.com/devrayat000/video-process/models"
+	"github.com/devrayat000/video-process/pubsub"
 	"github.com/devrayat000/video-process/utils"
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// --- Configuration ---
-var rabbitURL = os.Getenv("RABBITMQ_URL")
-
 func main() {
-	// 1. Connect to RabbitMQ
-	// Retry logic is crucial because RabbitMQ might take a few seconds to boot in Docker
-	var conn *amqp.Connection
-	var err error
-
-	for i := 0; i < 10; i++ {
-		conn, err = amqp.Dial(rabbitURL)
-		if err == nil {
-			break
-		}
-		log.Printf("Waiting for RabbitMQ... (%s)", err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		log.Fatal("Failed to connect to RabbitMQ after retries")
-	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer ch.Close()
-
-	// 2. Declare Queue (Ensure it exists)
-	q, err := ch.QueueDeclare(
-		"video_jobs", // name
-		true,         // durable
-		false,        // delete when unused
-		false,        // exclusive
-		false,        // no-wait
-		nil,          // arguments
-	)
-	if err != nil {
-		log.Fatal(err)
+	// Initialize Database and Redis
+	if err := db.InitDB(); err != nil {
+		log.Fatal("Failed to initialize database:", err)
 	}
 
-	// 3. HTTP Handlers
+	if err := pubsub.InitRedis(); err != nil {
+		log.Fatal("Failed to initialize Redis:", err)
+	}
+
+	// HTTP Handlers
 	http.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
 		enableCors(&w)
 
@@ -73,20 +43,25 @@ func main() {
 			return
 		}
 
-		// Publish to RabbitMQ
-		body, _ := json.Marshal(job)
-		err = ch.Publish(
-			"",     // exchange
-			q.Name, // routing key
-			false,  // mandatory
-			false,  // immediate
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        body,
-			})
+		// Create video record in database
+		video := &models.Video{
+			ID:           job.VideoID,
+			OriginalName: job.OriginalName,
+			S3Path:       job.S3Path,
+			Status:       models.StatusPending,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		}
 
-		if err != nil {
-			log.Printf("Failed to publish message: %s", err)
+		if err := db.CreateVideo(video); err != nil {
+			log.Printf("Failed to create video record: %s", err)
+			http.Error(w, "Failed to create video record", http.StatusInternalServerError)
+			return
+		}
+
+		// Enqueue job to Redis Stream
+		if err := pubsub.EnqueueJob(job); err != nil {
+			log.Printf("Failed to enqueue job: %s", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -95,6 +70,177 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "queued", "id": job.VideoID})
+	})
+
+	// Get video details
+	http.HandleFunc("/videos/", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		videoID := r.URL.Path[len("/videos/"):]
+		if videoID == "" {
+			http.Error(w, "Video ID required", http.StatusBadRequest)
+			return
+		}
+
+		video, err := db.GetVideo(videoID)
+		if err != nil {
+			http.Error(w, "Video not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(video)
+	})
+
+	// List all videos
+	http.HandleFunc("/videos", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		limit := 20
+		offset := 0
+
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil {
+				limit = l
+			}
+		}
+
+		if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+			if o, err := strconv.Atoi(offsetStr); err == nil {
+				offset = o
+			}
+		}
+
+		videos, err := db.ListVideos(limit, offset)
+		if err != nil {
+			http.Error(w, "Failed to fetch videos", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(videos)
+	})
+
+	// SSE endpoint for real-time progress updates
+	http.HandleFunc("/progress/", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		videoID := r.URL.Path[len("/progress/"):]
+		if videoID == "" {
+			http.Error(w, "Video ID required", http.StatusBadRequest)
+			return
+		}
+
+		// Set headers for SSE
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Send current progress if available
+		if progress, err := pubsub.GetProgress(videoID); err == nil {
+			data, _ := json.Marshal(progress)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+
+		// Subscribe to progress updates
+		ctx := r.Context()
+		progressChan, err := pubsub.SubscribeToProgress(ctx, videoID)
+		if err != nil {
+			http.Error(w, "Failed to subscribe", http.StatusInternalServerError)
+			return
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case progress := <-progressChan:
+				if progress == nil {
+					return
+				}
+				data, _ := json.Marshal(progress)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+
+				// Close connection when completed or failed
+				if progress.Status == models.StatusCompleted || progress.Status == models.StatusFailed {
+					return
+				}
+			}
+		}
+	})
+
+	// SSE endpoint for all progress updates
+	http.HandleFunc("/progress", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		// Set headers for SSE
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Subscribe to all progress updates
+		ctx := r.Context()
+		progressChan, err := pubsub.SubscribeToAllProgress(ctx)
+		if err != nil {
+			http.Error(w, "Failed to subscribe", http.StatusInternalServerError)
+			return
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case progress := <-progressChan:
+				if progress == nil {
+					return
+				}
+				data, _ := json.Marshal(progress)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
 	})
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
