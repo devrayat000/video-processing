@@ -1,4 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useActionState, useCallback, useEffect, useMemo, useState, useOptimistic } from 'react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { toast } from 'sonner'
 import './App.css'
 
 const API_BASE_URL = 'http://localhost:8080'
@@ -104,6 +109,42 @@ const defaultFormState = (): JobForm => ({
   s3Path: '',
 })
 
+// Server action for submitting jobs
+async function submitJob(_prevState: { error?: string; success?: boolean } | null, formData: FormData) {
+  const videoId = formData.get('videoId') as string
+  const originalName = formData.get('originalName') as string
+  const s3Path = formData.get('s3Path') as string
+
+  if (!originalName || !s3Path) {
+    return { error: 'Original name and S3 path are required.' }
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_id: videoId,
+        original_name: originalName,
+        s3_path: s3Path,
+      }),
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      throw new Error(message || 'Failed to submit job')
+    }
+
+    const result = await response.json()
+    toast.success(`Job ${result.id || videoId} queued successfully.`)
+    return { success: true }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Failed to submit job'
+    toast.error(errorMessage)
+    return { error: errorMessage }
+  }
+}
+
 function App() {
   const [videos, setVideos] = useState<Video[]>([])
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null)
@@ -113,8 +154,15 @@ function App() {
   const [listError, setListError] = useState<string | null>(null)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [jobForm, setJobForm] = useState<JobForm>(defaultFormState)
-  const [submitting, setSubmitting] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+
+  // Use useActionState for form submission
+  const [formState, formAction, isPending] = useActionState(submitJob, null)
+
+  // Use useOptimistic for optimistic updates
+  const [optimisticVideos, addOptimisticVideo] = useOptimistic(
+    videos,
+    (state, newVideo: Video) => [newVideo, ...state]
+  )
 
   const selectedVideo = useMemo(
     () => selectedVideoDetails ?? videos.find((video) => video.id === selectedVideoId) ?? null,
@@ -123,11 +171,11 @@ function App() {
 
   const summary = useMemo(() => {
     const counts = { pending: 0, processing: 0, completed: 0, failed: 0 }
-    videos.forEach((video) => {
+    optimisticVideos.forEach((video) => {
       counts[video.status] += 1
     })
     return counts
-  }, [videos])
+  }, [optimisticVideos])
 
   const loadVideos = useCallback(async () => {
     setLoadingList(true)
@@ -146,6 +194,7 @@ function App() {
       }
     } catch (error) {
       setListError(error instanceof Error ? error.message : 'Failed to load videos')
+      toast.error('Failed to load videos')
     } finally {
       setLoadingList(false)
     }
@@ -167,6 +216,7 @@ function App() {
       setSelectedVideoDetails(data)
     } catch (error) {
       setDetailsError(error instanceof Error ? error.message : 'Failed to load details')
+      toast.error('Failed to load video details')
     }
   }, [])
 
@@ -222,44 +272,20 @@ function App() {
     }
   }, [loadVideoDetails, loadVideos, selectedVideoId])
 
+  // Reset form on successful submission
+  useEffect(() => {
+    if (formState?.success) {
+      setJobForm(defaultFormState())
+      loadVideos()
+    }
+  }, [formState, loadVideos])
+
   const handleFormChange = (field: keyof JobForm, value: string) => {
     setJobForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleSubmitJob = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!jobForm.originalName || !jobForm.s3Path) {
-      setToast({ type: 'error', message: 'Original name and S3 path are required.' })
-      return
-    }
-
-    setSubmitting(true)
-    setToast(null)
-    try {
-      const response = await fetch(`${API_BASE_URL}/jobs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          video_id: jobForm.videoId,
-          original_name: jobForm.originalName,
-          s3_path: jobForm.s3Path,
-        }),
-      })
-
-      if (!response.ok) {
-        const message = await response.text()
-        throw new Error(message || 'Failed to submit job')
-      }
-
-      const result = await response.json()
-      setToast({ type: 'success', message: `Job ${result.id || jobForm.videoId} queued successfully.` })
-      setJobForm(defaultFormState)
-      loadVideos()
-    } catch (error) {
-      setToast({ type: 'error', message: error instanceof Error ? error.message : 'Failed to submit job' })
-    } finally {
-      setSubmitting(false)
-    }
+  const handleInputChange = (field: keyof JobForm) => (event: React.ChangeEvent<HTMLInputElement>) => {
+    handleFormChange(field, event.target.value)
   }
 
   const regenerateVideoId = () => {
@@ -288,12 +314,6 @@ function App() {
         </div>
       </header>
 
-      {toast && (
-        <div className={`toast ${toast.type}`} role="status">
-          {toast.message}
-        </div>
-      )}
-
       <section className="grid">
         <div className="panel form-panel">
           <div className="panel-header">
@@ -301,39 +321,49 @@ function App() {
               <h2>Submit a processing job</h2>
               <p>Provide a globally unique ID and the S3 object that should be processed by the backend.</p>
             </div>
-            <button type="button" className="ghost" onClick={regenerateVideoId}>
+            <Button type="button" variant="outline" size="sm" onClick={regenerateVideoId}>
               Generate ID
-            </button>
+            </Button>
           </div>
-          <form className="job-form" onSubmit={handleSubmitJob}>
-            <label>
-              Video ID
-              <input value={jobForm.videoId} onChange={(event) => handleFormChange('videoId', event.target.value)} required />
-              <span className="hint">Must be unique per job. Prefilled for convenience.</span>
-            </label>
-            <label>
-              Original file name
-              <input
-                value={jobForm.originalName}
-                placeholder="eg. corporate_reel.mov"
-                onChange={(event) => handleFormChange('originalName', event.target.value)}
+          <form className="job-form" action={formAction}>
+            <div className="form-field">
+              <Label htmlFor="videoId">Video ID</Label>
+              <Input
+                id="videoId"
+                name="videoId"
+                value={jobForm.videoId}
+                onChange={handleInputChange('videoId')}
                 required
               />
-            </label>
-            <label>
-              S3 path
-              <input
+              <span className="hint">Must be unique per job. Prefilled for convenience.</span>
+            </div>
+            <div className="form-field">
+              <Label htmlFor="originalName">Original file name</Label>
+              <Input
+                id="originalName"
+                name="originalName"
+                value={jobForm.originalName}
+                placeholder="eg. corporate_reel.mov"
+                onChange={handleInputChange('originalName')}
+                required
+              />
+            </div>
+            <div className="form-field">
+              <Label htmlFor="s3Path">S3 path</Label>
+              <Input
+                id="s3Path"
+                name="s3Path"
                 value={jobForm.s3Path}
                 placeholder="s3://bucket/key/video.mov"
-                onChange={(event) => handleFormChange('s3Path', event.target.value)}
+                onChange={handleInputChange('s3Path')}
                 required
               />
               <span className="hint">The worker pulls bytes directly from this URI.</span>
-            </label>
+            </div>
             <div className="form-actions">
-              <button type="submit" disabled={submitting}>
-                {submitting ? 'Queuing...' : 'Queue job'}
-              </button>
+              <Button type="submit" disabled={isPending}>
+                {isPending ? 'Queuing...' : 'Queue job'}
+              </Button>
             </div>
           </form>
         </div>
@@ -344,55 +374,54 @@ function App() {
               <h2>Live queue</h2>
               <p>Shows the 50 most recent jobs. Select a row for deep details.</p>
             </div>
-            <button type="button" className="ghost" onClick={loadVideos} disabled={loadingList}>
+            <Button type="button" variant="outline" size="sm" onClick={loadVideos} disabled={loadingList}>
               Refresh
-            </button>
+            </Button>
           </div>
 
           {listError && <p className="error">{listError}</p>}
           {loadingList ? (
             <div className="skeleton">Loading jobs…</div>
-          ) : videos.length === 0 ? (
+          ) : optimisticVideos.length === 0 ? (
             <div className="empty-state">
               <p>No jobs yet.</p>
               <span>Submit a video above to get started.</span>
             </div>
           ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Video</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Size</th>
-                    <th scope="col">Duration</th>
-                    <th scope="col">Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {videos.map((video) => (
-                    <tr
-                      key={video.id}
-                      className={video.id === selectedVideoId ? 'selected' : undefined}
-                      onClick={() => setSelectedVideoId(video.id)}
-                    >
-                      <td>
-                        <p className="primary">{video.original_name || video.id}</p>
-                        <span className="secondary">{video.id}</span>
-                      </td>
-                      <td>
-                        <span className={`status-pill ${statusMeta[video.status].tone}`}>
-                          {statusMeta[video.status].label}
-                        </span>
-                      </td>
-                      <td>{formatBytes(video.file_size)}</td>
-                      <td>{formatDuration(video.duration)}</td>
-                      <td>{formatDateTime(video.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Video</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Size</TableHead>
+                  <TableHead>Duration</TableHead>
+                  <TableHead>Created</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {optimisticVideos.map((video) => (
+                  <TableRow
+                    key={video.id}
+                    data-state={video.id === selectedVideoId ? 'selected' : undefined}
+                    onClick={() => setSelectedVideoId(video.id)}
+                    className="cursor-pointer"
+                  >
+                    <TableCell>
+                      <p className="primary">{video.original_name || video.id}</p>
+                      <span className="secondary">{video.id}</span>
+                    </TableCell>
+                    <TableCell>
+                      <span className={`status-pill ${statusMeta[video.status].tone}`}>
+                        {statusMeta[video.status].label}
+                      </span>
+                    </TableCell>
+                    <TableCell>{formatBytes(video.file_size)}</TableCell>
+                    <TableCell>{formatDuration(video.duration)}</TableCell>
+                    <TableCell>{formatDateTime(video.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           )}
         </div>
       </section>
