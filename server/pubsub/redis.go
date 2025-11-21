@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/devrayat000/video-process/models"
-	"github.com/devrayat000/video-process/utils"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -51,7 +50,7 @@ func InitRedis() error {
 }
 
 // EnqueueJob adds a video processing job to the Redis stream
-func EnqueueJob(job utils.VideoJob) error {
+func EnqueueJob(job models.VideoJob) error {
 	ctx := context.Background()
 
 	data, err := json.Marshal(job)
@@ -63,7 +62,6 @@ func EnqueueJob(job utils.VideoJob) error {
 		"video_id":      job.VideoID,
 		"s3_path":       job.S3Path,
 		"original_name": job.OriginalName,
-		"bucket":        job.Bucket,
 		"data":          string(data),
 		"enqueued_at":   time.Now().Unix(),
 	}
@@ -82,7 +80,7 @@ func EnqueueJob(job utils.VideoJob) error {
 }
 
 // ConsumeJobs reads jobs from the Redis stream and processes them
-func ConsumeJobs(ctx context.Context, handler func(utils.VideoJob) error) error {
+func ConsumeJobs(ctx context.Context, handler func(models.VideoJob) error) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -135,15 +133,15 @@ func ConsumeJobs(ctx context.Context, handler func(utils.VideoJob) error) error 
 }
 
 // parseJob extracts VideoJob from Redis stream message
-func parseJob(values map[string]interface{}) (utils.VideoJob, error) {
+func parseJob(values map[string]interface{}) (models.VideoJob, error) {
 	dataStr, ok := values["data"].(string)
 	if !ok {
-		return utils.VideoJob{}, fmt.Errorf("missing or invalid data field")
+		return models.VideoJob{}, fmt.Errorf("missing or invalid data field")
 	}
 
-	var job utils.VideoJob
+	var job models.VideoJob
 	if err := json.Unmarshal([]byte(dataStr), &job); err != nil {
-		return utils.VideoJob{}, fmt.Errorf("failed to unmarshal job: %w", err)
+		return models.VideoJob{}, fmt.Errorf("failed to unmarshal job: %w", err)
 	}
 
 	return job, nil

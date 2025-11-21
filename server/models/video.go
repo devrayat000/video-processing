@@ -48,3 +48,9 @@ type ProcessingProgress struct {
 	Message           string      `json:"message"`
 	Timestamp         time.Time   `json:"timestamp"`
 }
+
+type VideoJob struct {
+	VideoID      string `json:"video_id"`
+	S3Path       string `json:"s3_path"`
+	OriginalName string `json:"original_name"`
+}

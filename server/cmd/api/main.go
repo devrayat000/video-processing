@@ -11,7 +11,6 @@ import (
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
-	"github.com/devrayat000/video-process/utils"
 )
 
 func main() {
@@ -37,7 +36,7 @@ func main() {
 			return
 		}
 
-		var job utils.VideoJob
+		var job models.VideoJob
 		if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return

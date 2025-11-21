@@ -18,7 +18,6 @@ import (
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
-	"github.com/devrayat000/video-process/utils"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -71,7 +70,7 @@ func main() {
 	log.Println(" [*] Worker started. Ready to process videos from Redis Streams.")
 
 	// 3. Start consuming jobs from Redis
-	err = pubsub.ConsumeJobs(ctx, func(job utils.VideoJob) error {
+	err = pubsub.ConsumeJobs(ctx, func(job models.VideoJob) error {
 		log.Printf(" [x] Received Job: id=%s source=%s", job.VideoID, job.S3Path)
 
 		// Process the video
@@ -92,7 +91,7 @@ func main() {
 	log.Println("Worker stopped gracefully")
 }
 
-func processVideoStreaming(mc *minio.Client, job utils.VideoJob) error {
+func processVideoStreaming(mc *minio.Client, job models.VideoJob) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 
@@ -273,7 +272,7 @@ func getTargetResolutions(sourceHeight int) []int {
 }
 
 // transcodeResolution transcodes a single resolution
-func transcodeResolution(ctx context.Context, mc *minio.Client, job utils.VideoJob, height, sourceWidth int) error {
+func transcodeResolution(ctx context.Context, mc *minio.Client, job models.VideoJob, height, sourceWidth int) error {
 	// Calculate width maintaining aspect ratio (will be handled by FFmpeg's scale=-2)
 	args := []string{
 		"-y",
