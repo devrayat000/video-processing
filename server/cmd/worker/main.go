@@ -403,7 +403,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 	}
 
 	// Monitor FFmpeg progress in background
-	go monitorFFmpegProgressBatch(ffmpegStderr, job.VideoID, renditions)
+	go monitorFFmpegProgressBatch(ffmpegStderr)
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg execution error: %w", err)
@@ -435,17 +435,14 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 		return fmt.Errorf("failed to upload master playlist: %w", err)
 	}
 
-	// Generate presigned URL for master playlist
-	masterURL, err := mc.PresignedGetObject(ctx, s3Bucket, masterPlaylistKey, 7*24*time.Hour, nil)
-	if err != nil {
-		log.Printf(" [!] Failed to generate master playlist URL: %v", err)
-	} else {
-		// Update video record with master playlist info
-		gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
-			MasterPlaylistKey: ptr(masterPlaylistKey),
-			MasterPlaylistURL: ptr(masterURL.String()),
-		})
-	}
+	// Construct permanent S3 URL for master playlist
+	masterURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, masterPlaylistKey)
+
+	// Update video record with master playlist info
+	gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
+		MasterPlaylistKey: ptr(masterPlaylistKey),
+		MasterPlaylistURL: ptr(masterURL),
+	})
 
 	log.Printf(" [√] Master playlist uploaded: %s", masterPlaylistKey)
 
@@ -504,12 +501,9 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 
 		log.Printf(" [>] Uploaded %d segments for %s", segmentCount, resolutionName)
 
-		// Generate presigned URL for playlist (valid for 7 days)
+		// Construct permanent S3 URL for playlist
 		playlistS3Key := fmt.Sprintf("%s/processed/%s/playlist.m3u8", job.VideoID, streamName)
-		presignedURL, err := mc.PresignedGetObject(ctx, s3Bucket, playlistS3Key, 7*24*time.Hour, nil)
-		if err != nil {
-			log.Printf(" [!] Failed to generate presigned URL: %v", err)
-		}
+		playlistURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, playlistS3Key)
 
 		// Calculate bandwidth (convert kbps to bps)
 		bandwidth := r.Bitrate * 1000
@@ -520,7 +514,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 			VideoID:       job.VideoID,
 			Resolution:    resolutionName,
 			PlaylistS3Key: playlistS3Key,
-			PlaylistURL:   presignedURL.String(),
+			PlaylistURL:   playlistURL,
 			SegmentCount:  segmentCount,
 			TotalSize:     totalSize,
 			Bandwidth:     bandwidth,
@@ -549,7 +543,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 	return nil
 }
 
-func monitorFFmpegProgressBatch(stderr io.ReadCloser, videoID uuid.UUID, renditions []Rendition) {
+func monitorFFmpegProgressBatch(stderr io.ReadCloser) {
 	defer stderr.Close()
 
 	scanner := bufio.NewScanner(stderr)
