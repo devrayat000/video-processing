@@ -17,7 +17,7 @@ const createS3Client = () => {
 
   return new S3Client({
     region: region || "us-east-1",
-    endpoint: "http://localhost:9000",
+    endpoint: "http://host.docker.internal:9000",
     forcePathStyle: true,
     credentials:
       accessKeyId && secretAccessKey
@@ -135,7 +135,7 @@ export const uploadFileToS3 = async (
     await upload.done();
 
     // Return the S3 URL
-    return `http://localhost:9000/${bucket}/${key}`;
+    return `http://host.docker.internal:9000/${bucket}/${key}`;
   } catch (error) {
     console.error("Failed to upload file to S3:", error);
     throw error;

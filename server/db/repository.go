@@ -155,6 +155,7 @@ func GetVideo(videoID string) (*models.Video, error) {
 func ListVideos(limit, offset int) ([]*models.Video, error) {
 	query := `
 		SELECT id, original_name, s3_path, status, source_height, source_width, 
+				master_playlist_key, master_playlist_url,
 		       duration, file_size, created_at, updated_at, completed_at, error_message
 		FROM videos ORDER BY created_at DESC LIMIT $1 OFFSET $2
 	`
@@ -177,6 +178,8 @@ func ListVideos(limit, offset int) ([]*models.Video, error) {
 			&video.Status,
 			&video.SourceHeight,
 			&video.SourceWidth,
+			&video.MasterPlaylistKey,
+			&video.MasterPlaylistURL,
 			&video.Duration,
 			&video.FileSize,
 			&video.CreatedAt,
