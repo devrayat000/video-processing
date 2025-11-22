@@ -32,7 +32,6 @@ import {
   SettingsIcon,
   TheaterIcon,
   Volume1Icon,
-  VolumeIcon,
   VolumeOffIcon,
 } from "lucide-react";
 

@@ -40,36 +40,36 @@ const formatFileSize = (bytes: number): string => {
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
 };
 
+// Submit job to backend after upload
+const submitJobToBackend = async (
+  videoId: string,
+  originalName: string,
+  s3Path: string
+) => {
+  const response = await fetch(`${API_BASE_URL}/jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_id: videoId,
+      original_name: originalName,
+      s3_path: s3Path,
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to submit job");
+  }
+
+  const result = await response.json();
+  return result.id || videoId;
+};
+
 export default function VideoUpload() {
   const navigate = useNavigate();
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>(
     {}
   );
-
-  // Submit job to backend after upload
-  const submitJobToBackend = async (
-    videoId: string,
-    originalName: string,
-    s3Path: string
-  ) => {
-    const response = await fetch(`${API_BASE_URL}/jobs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        video_id: videoId,
-        original_name: originalName,
-        s3_path: s3Path,
-      }),
-    });
-
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message || "Failed to submit job");
-    }
-
-    const result = await response.json();
-    return result.id || videoId;
-  };
 
   const dropzone = useDropzone<UploadResult, UploadError>({
     validation: {

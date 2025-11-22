@@ -4,7 +4,6 @@ import Layout from "./components/Layout";
 import VideoUpload from "./pages/VideoUpload";
 import VideoList from "./pages/VideoList";
 import VideoDetails from "./pages/VideoDetails";
-import VideoPlayer from "./pages/VideoPlayer";
 
 export default function App() {
   return (
@@ -13,9 +12,10 @@ export default function App() {
         <Route path="/*" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="upload" element={<VideoUpload />} />
-          <Route path="videos" element={<VideoList />} />
-          <Route path="videos/:videoId" element={<VideoDetails />} />
-          <Route path="videos/:videoId/player" element={<VideoPlayer />} />
+          <Route path="videos">
+            <Route index element={<VideoList />} />
+            <Route path=":videoId" element={<VideoDetails />} />
+          </Route>
         </Route>
       </Routes>
     </BrowserRouter>

@@ -1,6 +1,6 @@
 "use client";
 
-import { cache, Suspense, use } from "react";
+import { cache, startTransition, Suspense, use } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -111,7 +111,11 @@ export default function VideoListPage() {
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => navigate(0)}
+            onClick={() => {
+              startTransition(() => {
+                navigate(0);
+              });
+            }}
             // disabled={loadingList}
           >
             Refresh
@@ -175,9 +179,9 @@ function VideoList({ videosPromise }: { videosPromise: Promise<Video[]> }) {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => navigate(`/videos/${video.id}/player`)}
+                  onClick={() => navigate(`/videos/${video.id}`)}
                 >
-                  Play
+                  View
                 </Button>
               )}
             </TableCell>
