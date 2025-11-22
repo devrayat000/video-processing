@@ -11,11 +11,13 @@ import (
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
+	"gorm.io/gorm"
 )
 
 func main() {
 	// Initialize Database and Redis
-	if err := db.InitDB(); err != nil {
+	gormDB, err := db.InitDB()
+	if err != nil {
 		log.Fatal("Failed to initialize database:", err)
 	}
 
@@ -52,7 +54,7 @@ func main() {
 			UpdatedAt:    time.Now(),
 		}
 
-		if err := db.CreateVideo(video); err != nil {
+		if err := gorm.G[models.Video](gormDB).Create(r.Context(), video); err != nil {
 			log.Printf("Failed to create video record: %s", err)
 			http.Error(w, "Failed to create video record", http.StatusInternalServerError)
 			return
@@ -68,7 +70,7 @@ func main() {
 		log.Printf(" [x] Sent Job: %s", job.VideoID)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "queued", "id": job.VideoID})
+		json.NewEncoder(w).Encode(map[string]string{"status": "queued", "id": job.VideoID.String()})
 	})
 
 	// Get video details
@@ -90,14 +92,14 @@ func main() {
 			return
 		}
 
-		video, err := db.GetVideo(videoID)
+		video, err := gorm.G[models.Video](gormDB).Where("id = ?", videoID).First(r.Context())
 		if err != nil {
 			http.Error(w, "Video not found", http.StatusNotFound)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(video)
+		json.NewEncoder(w).Encode(&video)
 	})
 
 	// List all videos
@@ -128,7 +130,7 @@ func main() {
 			}
 		}
 
-		videos, err := db.ListVideos(limit, offset)
+		videos, err := gorm.G[models.Video](gormDB).Limit(limit).Offset(offset).Find(r.Context())
 		if err != nil {
 			http.Error(w, "Failed to fetch videos", http.StatusInternalServerError)
 			return
