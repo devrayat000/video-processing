@@ -24,6 +24,7 @@ type Video = {
   original_name: string;
   s3_path: string;
   status: string;
+  master_playlist_url?: string;
   source_height?: number;
   source_width?: number;
   duration?: number;
@@ -45,13 +46,13 @@ const loadVideoDetails = cache(async (id: string) => {
   const data: Video = await response.json();
   // setVideo(data);
 
-  if (data.status !== "completed") {
-    throw new Error("Video processing is not complete yet.");
-  }
+  // if (data.status !== "completed") {
+  //   throw new Error("Video processing is not complete yet.");
+  // }
 
-  if (!data.resolutions || data.resolutions.length === 0) {
-    throw new Error("No video renditions available.");
-  }
+  // if (!data.resolutions || data.resolutions.length === 0) {
+  //   throw new Error("No video renditions available.");
+  // }
   return data;
 
   // // Use the highest quality resolution available
@@ -118,7 +119,7 @@ function VideoPlayer({ videoPromise }: { videoPromise: Promise<Video> }) {
     <div className="panel">
       <div className="aspect-video bg-black rounded-lg overflow-hidden">
         <CustomVideoPlayer
-          src={video.s3_path}
+          src={video.master_playlist_url!}
           poster=""
           theme="dark"
           icons={playerIcons}
@@ -128,27 +129,6 @@ function VideoPlayer({ videoPromise }: { videoPromise: Promise<Video> }) {
           controlSize={40}
         />
       </div>
-
-      {/* {video?.resolutions && (
-            <div className="mt-6">
-              <h3 className="font-semibold mb-3">Available Quality Options</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {video.resolutions
-                  .sort((a, b) => b.height - a.height)
-                  .map((resolution) => (
-                    <div key={resolution.id} className="border rounded p-3">
-                      <p className="font-medium">{resolution.height}p</p>
-                      <p className="text-sm text-muted-foreground">
-                        {resolution.width}×{resolution.height}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        {resolution.bitrate} kbps
-                      </p>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )} */}
     </div>
   );
 }
