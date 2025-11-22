@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -33,13 +32,13 @@ var (
 	s3Bucket   = os.Getenv("S3_BUCKET")
 )
 
-// ResolutionInfo holds metadata about a processed resolution for master playlist generation
-type ResolutionInfo struct {
-	Resolution   string
-	Bandwidth    int
-	PlaylistKey  string
-	SegmentCount int
-	TotalSize    int64
+// Rendition defines a single video quality preset
+type Rendition struct {
+	Height    int
+	Bitrate   int // in kbps
+	MaxRate   int // in kbps
+	BufSize   int // in kbps
+	AudioRate int // in kbps
 }
 
 func main() {
@@ -159,70 +158,39 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 		log.Printf(" [!] Failed to update metadata: %v", err)
 	}
 
-	// Determine which resolutions to generate
-	resolutions := getTargetResolutions(metadata.Height)
-	log.Printf(" [i] Generating %d resolutions: %v", len(resolutions), resolutions)
+	// Determine which renditions to generate
+	renditions := filterRenditions(metadata.Height)
+	log.Printf(" [i] Generating %d renditions: %v", len(renditions), getRenditionHeights(renditions))
 
-	message = fmt.Sprintf("Processing %d resolutions...", len(resolutions))
+	message = fmt.Sprintf("Processing %d renditions...", len(renditions))
 	pubsub.PublishProgress(models.ProcessingProgress{
 		VideoID:          job.VideoID,
 		Status:           models.StatusProcessing,
-		TotalResolutions: len(resolutions),
+		TotalResolutions: len(renditions),
 		Progress:         5,
 		Message:          &message,
 		Timestamp:        time.Now(),
 	})
 
-	// Track resolution info for master playlist
-	var resolutionInfos []ResolutionInfo
-
-	// Process each resolution
-	for i, res := range resolutions {
-		progressPercent := 5 + ((i * 90) / len(resolutions))
-
-		message = fmt.Sprintf("Processing %dp (%d/%d)...", res, i+1, len(resolutions))
-		pubsub.PublishProgress(models.ProcessingProgress{
-			VideoID:           job.VideoID,
-			Status:            models.StatusProcessing,
-			CurrentResolution: res,
-			TotalResolutions:  len(resolutions),
-			Progress:          progressPercent,
-			Message:           &message,
-			Timestamp:         time.Now(),
-		})
-
-		resInfo, err := transcodeToHLS(ctx, mc, gormDB, job, res, metadata.Width, metadata.Height)
-		if err != nil {
-			errMsg := fmt.Sprintf("failed to transcode %dp: %v", res, err)
-			gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
-				Status:       models.StatusFailed,
-				ErrorMessage: &errMsg,
-			})
-			pubsub.PublishProgress(models.ProcessingProgress{
-				VideoID:   job.VideoID,
-				Status:    models.StatusFailed,
-				Progress:  progressPercent,
-				Message:   &errMsg,
-				Timestamp: time.Now(),
-			})
-			return fmt.Errorf("%s", errMsg)
-		}
-
-		resolutionInfos = append(resolutionInfos, resInfo)
-		log.Printf(" [√] Completed %dp HLS for video_id=%s", res, job.VideoID)
-	}
-
-	// Generate and upload master playlist
-	if err := generateAndUploadMasterPlaylist(ctx, mc, gormDB, job.VideoID, resolutionInfos); err != nil {
-		log.Printf(" [!] Failed to generate master playlist: %v", err)
-
-		errorMessage := err.Error()
+	// Transcode all renditions in a single FFmpeg command
+	err = transcodeToHLSBatch(ctx, mc, gormDB, job, renditions)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to transcode video: %v", err)
 		gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
 			Status:       models.StatusFailed,
-			ErrorMessage: &errorMessage,
+			ErrorMessage: &errMsg,
 		})
-		return err
+		pubsub.PublishProgress(models.ProcessingProgress{
+			VideoID:   job.VideoID,
+			Status:    models.StatusFailed,
+			Progress:  50,
+			Message:   &errMsg,
+			Timestamp: time.Now(),
+		})
+		return fmt.Errorf("%s", errMsg)
 	}
+
+	log.Printf(" [√] Completed HLS transcoding for video_id=%s", job.VideoID)
 
 	// Mark as completed
 	_, err = gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
@@ -241,7 +209,7 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 		Timestamp: time.Now(),
 	})
 
-	log.Printf(" [√] All resolutions completed for video_id=%s", job.VideoID)
+	log.Printf(" [√] All renditions completed for video_id=%s", job.VideoID)
 	return nil
 }
 
@@ -299,281 +267,307 @@ func getVideoMetadata(ctx context.Context, sourceURL string) (*VideoMetadata, er
 	return metadata, nil
 }
 
-// getTargetResolutions returns the list of resolutions to generate
-// Standard resolutions: 2160p, 1440p, 1080p, 720p, 480p, 360p, 240p, 144p
-func getTargetResolutions(sourceHeight int) []int {
-	standardResolutions := []int{2160, 1440, 1080, 720, 480, 360, 240, 144}
+// getRenditionPresets returns all available rendition presets
+func getRenditionPresets() []Rendition {
+	return []Rendition{
+		{Height: 2160, Bitrate: 16000, MaxRate: 17600, BufSize: 24000, AudioRate: 256}, // 4K UHD
+		{Height: 1440, Bitrate: 9000, MaxRate: 9900, BufSize: 13500, AudioRate: 256},   // 2K QHD
+		{Height: 1080, Bitrate: 5000, MaxRate: 5350, BufSize: 7500, AudioRate: 192},    // Full HD
+		{Height: 720, Bitrate: 2800, MaxRate: 2996, BufSize: 4200, AudioRate: 160},     // HD
+		{Height: 480, Bitrate: 1400, MaxRate: 1498, BufSize: 2100, AudioRate: 128},     // SD
+		{Height: 360, Bitrate: 800, MaxRate: 856, BufSize: 1200, AudioRate: 128},       // Low
+		{Height: 240, Bitrate: 500, MaxRate: 535, BufSize: 750, AudioRate: 96},         // Mobile
+		{Height: 144, Bitrate: 300, MaxRate: 321, BufSize: 450, AudioRate: 96},         // Ultra Low
+	}
+}
 
-	var targets []int
+// filterRenditions selects renditions that don't exceed the source height
+func filterRenditions(sourceHeight int) []Rendition {
+	allRenditions := getRenditionPresets()
+	var selected []Rendition
 
-	// Find the highest standard resolution that doesn't exceed source height
-	startIdx := -1
-	for i, res := range standardResolutions {
-		if res <= sourceHeight {
-			startIdx = i
-			break
+	for _, r := range allRenditions {
+		if r.Height <= sourceHeight {
+			selected = append(selected, r)
 		}
 	}
 
-	// If source is smaller than 144p, just return the source height
-	if startIdx == -1 {
-		return []int{sourceHeight}
+	// If source is smaller than smallest preset, create a custom rendition
+	if len(selected) == 0 {
+		selected = []Rendition{
+			{Height: sourceHeight, Bitrate: sourceHeight * 2, MaxRate: sourceHeight*2 + 200, BufSize: sourceHeight * 3, AudioRate: 96},
+		}
 	}
 
-	// Generate all resolutions from the starting point down to 144p
-	targets = standardResolutions[startIdx:]
-
-	return targets
+	return selected
 }
 
-// transcodeToHLS transcodes a single resolution to HLS format
-func transcodeToHLS(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, job models.VideoJob, height, sourceWidth, sourceHeight int) (ResolutionInfo, error) {
+// getRenditionHeights returns a slice of heights for logging purposes
+func getRenditionHeights(renditions []Rendition) []int {
+	heights := make([]int, len(renditions))
+	for i, r := range renditions {
+		heights[i] = r.Height
+	}
+	return heights
+}
+
+// transcodeToHLSBatch transcodes all renditions in a single FFmpeg command
+func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, job models.VideoJob, renditions []Rendition) error {
 	// Create temporary directory for HLS output
-	tempDir := fmt.Sprintf("/tmp/hls_%s_%dp_%d", job.VideoID, height, time.Now().UnixNano())
+	tempDir := fmt.Sprintf("/tmp/%s", job.VideoID)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return ResolutionInfo{}, fmt.Errorf("failed to create temp dir: %w", err)
+		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir) // Clean up after upload
 
-	playlistPath := fmt.Sprintf("%s/playlist.m3u8", tempDir)
-	segmentPattern := fmt.Sprintf("%s/segment_%%03d.ts", tempDir)
+	splitCount := len(renditions)
 
-	// Determine audio bitrate based on resolution
-	audioBitrate := getAudioBitrate(height)
+	// -------- BUILD FILTER COMPLEX --------
+	var filterParts []string
 
+	// Split input into multiple streams
+	splitOutputs := make([]string, splitCount)
+	for i := 0; i < splitCount; i++ {
+		splitOutputs[i] = fmt.Sprintf("[v%d]", i+1)
+	}
+	filterParts = append(filterParts, fmt.Sprintf("[0:v]split=%d%s", splitCount, strings.Join(splitOutputs, "")))
+
+	// Scale each stream to target resolution
+	for i, r := range renditions {
+		filterParts = append(filterParts, fmt.Sprintf("[v%d]scale=-2:%d[v%dout]", i+1, r.Height, i+1))
+	}
+
+	filterComplex := strings.Join(filterParts, ";")
+
+	// -------- BUILD FFMPEG ARGS --------
 	args := []string{
 		"-y",
 		"-fflags", "+discardcorrupt",
 		"-i", job.S3Path,
-		"-vf", fmt.Sprintf("scale=-2:%d", height),
-		"-c:v", "libx264",
-		"-preset", "ultrafast",
-		"-crf", "23",
-		"-c:a", "aac",
-		"-b:a", fmt.Sprintf("%dk", audioBitrate),
-		"-f", "hls",
-		"-hls_time", "10",
-		"-hls_playlist_type", "vod",
-		"-hls_segment_type", "mpegts",
-		"-hls_segment_filename", segmentPattern,
-		"-hls_flags", "independent_segments",
-		"-start_number", "0",
-		playlistPath,
+		"-filter_complex", filterComplex,
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	log.Printf(" [>] Running: ffmpeg (transcoding to %dp HLS)", height)
+	// Add video maps for each rendition
+	for i, r := range renditions {
+		args = append(args,
+			"-map", fmt.Sprintf("[v%dout]", i+1),
+			fmt.Sprintf("-c:v:%d", i), "libx264",
+			fmt.Sprintf("-b:v:%d", i), fmt.Sprintf("%dk", r.Bitrate),
+			fmt.Sprintf("-maxrate:v:%d", i), fmt.Sprintf("%dk", r.MaxRate),
+			fmt.Sprintf("-bufsize:v:%d", i), fmt.Sprintf("%dk", r.BufSize),
+			"-preset", "ultrafast",
+			"-g", "48",
+			"-keyint_min", "48",
+			"-sc_threshold", "0",
+		)
+	}
 
+	// Add audio maps for each rendition
+	for i, r := range renditions {
+		args = append(args,
+			"-map", "a:0",
+			fmt.Sprintf("-c:a:%d", i), "aac",
+			fmt.Sprintf("-b:a:%d", i), fmt.Sprintf("%dk", r.AudioRate),
+			"-ac", "2",
+		)
+	}
+
+	// Build var_stream_map
+	varStreamParts := make([]string, splitCount)
+	for i := range renditions {
+		varStreamParts[i] = fmt.Sprintf("v:%d,a:%d", i, i)
+	}
+	varStreamMap := strings.Join(varStreamParts, " ")
+
+	// Add HLS output options
+	args = append(args,
+		"-f", "hls",
+		"-hls_time", "6",
+		"-hls_playlist_type", "vod",
+		"-hls_flags", "independent_segments",
+		"-hls_segment_type", "mpegts",
+		"-hls_segment_filename", fmt.Sprintf("%s/stream_%%v/segment_%%03d.ts", tempDir),
+		"-master_pl_name", "master.m3u8",
+		"-var_stream_map", varStreamMap,
+		fmt.Sprintf("%s/stream_%%v/playlist.m3u8", tempDir),
+	)
+
+	// Execute FFmpeg
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	log.Printf(" [>] Running FFmpeg batch transcoding for %d renditions", splitCount)
+
+	// Capture stderr for progress monitoring
 	ffmpegStderr, err := cmd.StderrPipe()
 	if err != nil {
-		return ResolutionInfo{}, fmt.Errorf("stderr pipe error: %w", err)
+		return fmt.Errorf("stderr pipe error: %w", err)
 	}
 
 	// Monitor FFmpeg progress in background
-	go monitorFFmpegProgress(ffmpegStderr, job.VideoID, height)
+	go monitorFFmpegProgressBatch(ffmpegStderr, job.VideoID, renditions)
 
 	if err := cmd.Run(); err != nil {
-		return ResolutionInfo{}, fmt.Errorf("ffmpeg execution error: %w", err)
+		return fmt.Errorf("ffmpeg execution error: %w", err)
 	}
 
-	// Upload all segment files to S3
-	segmentFiles, err := os.ReadDir(tempDir)
+	log.Printf(" [√] FFmpeg transcoding completed for video_id=%s", job.VideoID)
+
+	// -------- UPLOAD MASTER PLAYLIST FIRST --------
+	masterPlaylistPath := fmt.Sprintf("%s/master.m3u8", tempDir)
+	masterPlaylistKey := fmt.Sprintf("%s/processed/master.m3u8", job.VideoID)
+
+	masterFile, err := os.Open(masterPlaylistPath)
 	if err != nil {
-		return ResolutionInfo{}, fmt.Errorf("failed to read temp dir: %w", err)
+		return fmt.Errorf("failed to open master playlist: %w", err)
 	}
 
-	var totalSize int64
-	segmentCount := 0
-
-	for _, file := range segmentFiles {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".ts") {
-			continue
-		}
-
-		segmentPath := fmt.Sprintf("%s/%s", tempDir, file.Name())
-		s3Key := fmt.Sprintf("%s/processed/%dp/%s", job.VideoID, height, file.Name())
-
-		// Open and upload segment file
-		segmentFile, err := os.Open(segmentPath)
-		if err != nil {
-			return ResolutionInfo{}, fmt.Errorf("failed to open segment %s: %w", file.Name(), err)
-		}
-
-		fileInfo, err := segmentFile.Stat()
-		if err != nil {
-			segmentFile.Close()
-			return ResolutionInfo{}, fmt.Errorf("failed to stat segment: %w", err)
-		}
-
-		uploadInfo, err := mc.PutObject(ctx, s3Bucket, s3Key, segmentFile, fileInfo.Size(), minio.PutObjectOptions{
-			ContentType: "video/mp2t",
-		})
-		segmentFile.Close()
-
-		if err != nil {
-			return ResolutionInfo{}, fmt.Errorf("S3 upload error for %s: %w", file.Name(), err)
-		}
-
-		totalSize += uploadInfo.Size
-		segmentCount++
-		log.Printf(" [>] Uploaded segment %s (%d bytes)", file.Name(), uploadInfo.Size)
-	}
-
-	// Upload playlist file
-	playlistS3Key := fmt.Sprintf("%s/processed/%dp/playlist.m3u8", job.VideoID, height)
-	playlistFile, err := os.Open(playlistPath)
+	masterFileInfo, err := masterFile.Stat()
 	if err != nil {
-		return ResolutionInfo{}, fmt.Errorf("failed to open playlist: %w", err)
-	}
-	defer playlistFile.Close()
-
-	playlistInfo, err := playlistFile.Stat()
-	if err != nil {
-		return ResolutionInfo{}, fmt.Errorf("failed to stat playlist: %w", err)
+		masterFile.Close()
+		return fmt.Errorf("failed to stat master playlist: %w", err)
 	}
 
-	_, err = mc.PutObject(ctx, s3Bucket, playlistS3Key, playlistFile, playlistInfo.Size(), minio.PutObjectOptions{
+	_, err = mc.PutObject(ctx, s3Bucket, masterPlaylistKey, masterFile, masterFileInfo.Size(), minio.PutObjectOptions{
 		ContentType: "application/vnd.apple.mpegurl",
 	})
-	if err != nil {
-		return ResolutionInfo{}, fmt.Errorf("playlist upload error: %w", err)
-	}
-
-	totalSize += playlistInfo.Size()
-	log.Printf(" [>] Uploaded playlist for %dp", height)
-
-	// Generate presigned URL for playlist (valid for 7 days)
-	presignedURL, err := mc.PresignedGetObject(ctx, s3Bucket, playlistS3Key, 7*24*time.Hour, nil)
-	if err != nil {
-		log.Printf(" [!] Failed to generate presigned URL: %v", err)
-	}
-
-	// Estimate bandwidth
-	bandwidth := estimateBandwidth(height)
-
-	// Save resolution to database
-	resolution := &models.VideoResolution{
-		ID:            uuid.New(),
-		VideoID:       job.VideoID,
-		Resolution:    fmt.Sprintf("%dp", height),
-		PlaylistS3Key: playlistS3Key,
-		PlaylistURL:   presignedURL.String(),
-		SegmentCount:  segmentCount,
-		TotalSize:     totalSize,
-		Bandwidth:     bandwidth,
-		ProcessedAt:   time.Now(),
-	}
-
-	err = gorm.G[models.VideoResolution](gormDB).Create(ctx, resolution)
-	if err != nil {
-		log.Printf(" [!] Failed to save resolution to database: %v", err)
-	}
-
-	return ResolutionInfo{
-		Resolution:   fmt.Sprintf("%dp", height),
-		Bandwidth:    bandwidth,
-		PlaylistKey:  playlistS3Key,
-		SegmentCount: segmentCount,
-		TotalSize:    totalSize,
-	}, nil
-}
-
-func estimateBandwidth(height int) int {
-	bandwidthMap := map[int]int{
-		2160: 8000000, // 8 Mbps for 4K
-		1440: 6000000, // 6 Mbps for 1440p
-		1080: 5000000, // 5 Mbps for 1080p
-		720:  2800000, // 2.8 Mbps for 720p
-		480:  1400000, // 1.4 Mbps for 480p
-		360:  800000,  // 800 Kbps for 360p
-		240:  500000,  // 500 Kbps for 240p
-		144:  300000,  // 300 Kbps for 144p
-	}
-
-	if bw, exists := bandwidthMap[height]; exists {
-		return bw
-	}
-	return height * 2500 // Estimate based on height
-}
-
-// getAudioBitrate returns the appropriate audio bitrate for a given resolution
-// Following YouTube's standards: higher resolutions get better audio quality
-func getAudioBitrate(height int) int {
-	switch {
-	case height >= 1080:
-		return 192 // 192 kbps for 1080p and above
-	case height >= 720:
-		return 160 // 160 kbps for 720p
-	case height >= 480:
-		return 128 // 128 kbps for 480p
-	default:
-		return 96 // 96 kbps for 360p and below
-	}
-}
-
-func generateAndUploadMasterPlaylist(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, videoID uuid.UUID, resolutions []ResolutionInfo) error {
-	// Sort resolutions by bandwidth descending
-	sort.Slice(resolutions, func(i, j int) bool {
-		return resolutions[i].Bandwidth > resolutions[j].Bandwidth
-	})
-
-	// Generate master playlist content
-	var builder strings.Builder
-	builder.WriteString("#EXTM3U\n")
-	builder.WriteString("#EXT-X-VERSION:3\n\n")
-
-	for _, res := range resolutions {
-		builder.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,NAME=\"%s\"\n",
-			res.Bandwidth, res.Resolution,
-		))
-		builder.WriteString(fmt.Sprintf("%s/playlist.m3u8\n\n", res.Resolution))
-	}
-
-	// Upload master playlist
-	masterKey := fmt.Sprintf("%s/processed/master.m3u8", videoID)
-	content := builder.String()
-
-	_, err := mc.PutObject(ctx, s3Bucket, masterKey,
-		strings.NewReader(content), int64(len(content)),
-		minio.PutObjectOptions{
-			ContentType: "application/vnd.apple.mpegurl",
-		})
+	masterFile.Close()
 
 	if err != nil {
 		return fmt.Errorf("failed to upload master playlist: %w", err)
 	}
 
-	// Generate presigned URL
-	masterURL, err := mc.PresignedGetObject(ctx, s3Bucket, masterKey, 7*24*time.Hour, nil)
+	// Generate presigned URL for master playlist
+	masterURL, err := mc.PresignedGetObject(ctx, s3Bucket, masterPlaylistKey, 7*24*time.Hour, nil)
 	if err != nil {
 		log.Printf(" [!] Failed to generate master playlist URL: %v", err)
+	} else {
+		// Update video record with master playlist info
+		gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
+			MasterPlaylistKey: ptr(masterPlaylistKey),
+			MasterPlaylistURL: ptr(masterURL.String()),
+		})
 	}
 
-	// Update video record
-	_, err = gorm.G[models.Video](gormDB).Where("id = ?", videoID).Updates(ctx, models.Video{
-		MasterPlaylistKey: ptr(masterKey),
-		MasterPlaylistURL: ptr(masterURL.String()),
-	})
-	if err != nil {
-		log.Printf(" [!] Failed to update master playlist in DB: %v", err)
+	log.Printf(" [√] Master playlist uploaded: %s", masterPlaylistKey)
+
+	// -------- UPLOAD TO S3 --------
+	for i, r := range renditions {
+		streamDir := fmt.Sprintf("%s/stream_%d", tempDir, i)
+		streamName := fmt.Sprintf("stream_%d", i) // Keep same structure as temp dir
+		resolutionName := fmt.Sprintf("%dp", r.Height)
+
+		// Count segments and calculate total size
+		segmentFiles, err := os.ReadDir(streamDir)
+		if err != nil {
+			return fmt.Errorf("failed to read stream dir %s: %w", streamDir, err)
+		}
+
+		var totalSize int64
+		segmentCount := 0
+
+		// Upload segment files
+		for _, file := range segmentFiles {
+			if file.IsDir() {
+				continue
+			}
+
+			filePath := fmt.Sprintf("%s/%s", streamDir, file.Name())
+			s3Key := fmt.Sprintf("%s/processed/%s/%s", job.VideoID, streamName, file.Name())
+
+			fileHandle, err := os.Open(filePath)
+			if err != nil {
+				return fmt.Errorf("failed to open file %s: %w", file.Name(), err)
+			}
+
+			fileInfo, err := fileHandle.Stat()
+			if err != nil {
+				fileHandle.Close()
+				return fmt.Errorf("failed to stat file: %w", err)
+			}
+
+			contentType := "application/vnd.apple.mpegurl"
+			if strings.HasSuffix(file.Name(), ".ts") {
+				contentType = "video/mp2t"
+				segmentCount++
+			}
+
+			uploadInfo, err := mc.PutObject(ctx, s3Bucket, s3Key, fileHandle, fileInfo.Size(), minio.PutObjectOptions{
+				ContentType: contentType,
+			})
+			fileHandle.Close()
+
+			if err != nil {
+				return fmt.Errorf("S3 upload error for %s: %w", file.Name(), err)
+			}
+
+			totalSize += uploadInfo.Size
+		}
+
+		log.Printf(" [>] Uploaded %d segments for %s", segmentCount, resolutionName)
+
+		// Generate presigned URL for playlist (valid for 7 days)
+		playlistS3Key := fmt.Sprintf("%s/processed/%s/playlist.m3u8", job.VideoID, streamName)
+		presignedURL, err := mc.PresignedGetObject(ctx, s3Bucket, playlistS3Key, 7*24*time.Hour, nil)
+		if err != nil {
+			log.Printf(" [!] Failed to generate presigned URL: %v", err)
+		}
+
+		// Calculate bandwidth (convert kbps to bps)
+		bandwidth := r.Bitrate * 1000
+
+		// Save resolution to database
+		resolution := &models.VideoResolution{
+			ID:            uuid.New(),
+			VideoID:       job.VideoID,
+			Resolution:    resolutionName,
+			PlaylistS3Key: playlistS3Key,
+			PlaylistURL:   presignedURL.String(),
+			SegmentCount:  segmentCount,
+			TotalSize:     totalSize,
+			Bandwidth:     bandwidth,
+			ProcessedAt:   time.Now(),
+		}
+
+		err = gorm.G[models.VideoResolution](gormDB).Create(ctx, resolution)
+		if err != nil {
+			log.Printf(" [!] Failed to save resolution to database: %v", err)
+		}
+
+		// Publish progress for this rendition
+		progressPercent := 10 + ((i+1)*80)/len(renditions)
+		message := fmt.Sprintf("Uploaded %s (%d/%d)", resolutionName, i+1, len(renditions))
+		pubsub.PublishProgress(models.ProcessingProgress{
+			VideoID:           job.VideoID,
+			Status:            models.StatusProcessing,
+			CurrentResolution: r.Height,
+			TotalResolutions:  len(renditions),
+			Progress:          progressPercent,
+			Message:           &message,
+			Timestamp:         time.Now(),
+		})
 	}
 
-	log.Printf(" [√] Master playlist uploaded: %s", masterKey)
 	return nil
 }
 
-func monitorFFmpegProgress(stderr io.ReadCloser, videoID uuid.UUID, height int) {
+func monitorFFmpegProgressBatch(stderr io.ReadCloser, videoID uuid.UUID, renditions []Rendition) {
 	defer stderr.Close()
 
 	scanner := bufio.NewScanner(stderr)
 	progressRegex := regexp.MustCompile(`time=(\d+:\d+:\d+\.\d+)`)
+	fpsRegex := regexp.MustCompile(`fps=\s*(\d+\.?\d*)`)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		matches := progressRegex.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			log.Printf(" [>] FFmpeg progress for %dp: %s", height, matches[1])
+
+		timeMatches := progressRegex.FindStringSubmatch(line)
+		fpsMatches := fpsRegex.FindStringSubmatch(line)
+
+		if len(timeMatches) > 1 {
+			logMsg := fmt.Sprintf("FFmpeg progress: time=%s", timeMatches[1])
+			if len(fpsMatches) > 1 {
+				logMsg += fmt.Sprintf(", fps=%s", fpsMatches[1])
+			}
+			log.Printf(" [>] %s", logMsg)
 		}
 	}
 }
