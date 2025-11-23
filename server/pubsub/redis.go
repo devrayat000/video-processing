@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"github.com/devrayat000/video-process/models"
+	server_utils "github.com/devrayat000/video-process/utils"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -17,15 +17,18 @@ var RedisClient *redis.Client
 const (
 	VideoJobsStream   = "video:jobs"
 	ConsumerGroup     = "video-workers"
-	ConsumerName      = "worker"
 	ProgressKeyPrefix = "progress:"
 	ProgressChannel   = "video:progress:"
 	ProgressAllChan   = "video:progress:all"
 )
 
+var (
+	redisAddr    = server_utils.GetEnv("REDIS_ADDR", "localhost:6379")
+	redisPass    = server_utils.GetEnv("REDIS_PASSWORD", "")
+	ConsumerName = server_utils.GetEnv("HOSTNAME", "worker-1")
+)
+
 func InitRedis() error {
-	redisAddr := getEnv("REDIS_ADDR", "redis:6379")
-	redisPass := getEnv("REDIS_PASSWORD", "")
 
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
@@ -309,11 +312,4 @@ func SubscribeToAllProgress(ctx context.Context) (<-chan *models.ProcessingProgr
 	}()
 
 	return progressChan, nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
