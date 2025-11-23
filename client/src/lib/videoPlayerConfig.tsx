@@ -30,16 +30,16 @@ import {
   PictureInPicture2Icon,
   PlayIcon,
   SettingsIcon,
-  TheaterIcon,
+  FilmIcon,
   Volume1Icon,
-  VolumeOffIcon,
+  VolumeXIcon,
 } from "lucide-react";
 
 export const playerIcons: IconSet = {
   play: <PlayIcon />,
   pause: <PauseIcon />,
   volume: <Volume1Icon />,
-  volumeMute: <VolumeOffIcon />,
+  volumeMute: <VolumeXIcon />,
   fullscreen: <FullscreenIcon />,
   exitFullscreen: <MinimizeIcon />,
   pip: <PictureInPicture2Icon />,
@@ -47,7 +47,7 @@ export const playerIcons: IconSet = {
   speed: <GaugeIcon />,
   cc: <ClosedCaptionIcon />,
   back: <ChevronLeftIcon />,
-  theater: <TheaterIcon />,
+  theater: <FilmIcon />,
   check: <CheckIcon />,
   hdChip: <HDChip />,
   sleepTimer: <HourglassIcon />,
