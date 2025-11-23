@@ -19,6 +19,7 @@ import (
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
+	server_utils "github.com/devrayat000/video-process/utils"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -27,10 +28,10 @@ import (
 
 // Configuration
 var (
-	s3Endpoint = os.Getenv("S3_ENDPOINT")
-	s3Access   = os.Getenv("S3_ACCESS_KEY")
-	s3Secret   = os.Getenv("S3_SECRET_KEY")
-	s3Bucket   = os.Getenv("S3_BUCKET")
+	s3Endpoint = server_utils.GetEnv("S3_ENDPOINT", "localhost:9000")
+	s3Access   = server_utils.GetEnv("S3_ACCESS_KEY", "minioadmin")
+	s3Secret   = server_utils.GetEnv("S3_SECRET_KEY", "minioadmin")
+	s3Bucket   = server_utils.GetEnv("S3_BUCKET", "videos")
 )
 
 // Rendition defines a single video quality preset
