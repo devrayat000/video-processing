@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   cache,
   Suspense,
   use,
@@ -11,10 +12,16 @@ import {
 import { useParams } from "react-router";
 import { CustomVideoPlayer } from "@ntxmjs/react-custom-video-player";
 import { playerIcons, videoContainerStyles } from "@/lib/videoPlayerConfig";
+import { CircularProgress } from "@/components/custom-ui/circular-progress";
 
 const API_BASE_URL = "http://localhost:8080";
 
-type VideoStatus = "pending" | "processing" | "completed" | "failed";
+type VideoStatus =
+  | "waiting"
+  | "started"
+  | "processing"
+  | "completed"
+  | "failed";
 
 type Resolution = {
   id: string;
@@ -35,6 +42,7 @@ type Video = {
   source_height?: number;
   source_width?: number;
   duration?: number;
+  frames?: number;
   file_size?: number;
   created_at: string;
   updated_at: string;
@@ -46,64 +54,10 @@ type Video = {
 type ProcessingProgress = {
   video_id: string;
   status: VideoStatus;
-  current_resolution?: number;
-  total_resolutions?: number;
-  progress: number;
-  message?: string;
+  total_frames?: number;
+  processed_frames?: number;
+  error?: string;
   timestamp: string;
-};
-
-const statusMeta: Record<
-  VideoStatus,
-  {
-    label: string;
-    tone: "pending" | "processing" | "completed" | "failed";
-    blurb: string;
-  }
-> = {
-  pending: {
-    label: "Queued",
-    tone: "pending",
-    blurb: "Waiting for a worker to pick up the job.",
-  },
-  processing: {
-    label: "Processing",
-    tone: "processing",
-    blurb: "A worker is actively transcoding the video.",
-  },
-  completed: {
-    label: "Completed",
-    tone: "completed",
-    blurb: "All renditions are ready to deliver.",
-  },
-  failed: {
-    label: "Failed",
-    tone: "failed",
-    blurb: "The job encountered an error. Inspect the logs below.",
-  },
-};
-
-const formatBytes = (value?: number) => {
-  if (!value || Number.isNaN(value)) return "—";
-  if (value === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const idx = Math.floor(Math.log(value) / Math.log(1024));
-  const size = value / Math.pow(1024, idx);
-  return `${size.toFixed(1)} ${units[idx]}`;
-};
-
-const formatDuration = (value?: number) => {
-  if (!value || Number.isNaN(value)) return "—";
-  const minutes = Math.floor(value / 60);
-  const seconds = Math.floor(value % 60);
-  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
-};
-
-const formatDateTime = (value?: string) => {
-  if (!value) return "—";
-  const dt = new Date(value);
-  if (Number.isNaN(dt.valueOf())) return value;
-  return dt.toLocaleString();
 };
 
 const loadVideoDetails = cache(async (id: string) => {
@@ -137,56 +91,28 @@ export default function VideoDetailsPage() {
 
 function VideoDetails({ videoPromise }: { videoPromise: Promise<Video> }) {
   const video = use(videoPromise);
+  const isCompleted =
+    video.status === "completed" &&
+    !!video.master_playlist_url &&
+    !!video.completed_at;
 
   return (
     <div className="panel mb-8">
       <section>
-        <div className="aspect-video bg-black rounded-lg overflow-hidden flex items-center justify-center">
-          {video?.status === "completed" && video.master_playlist_url ? (
-            <CustomVideoPlayer
-              src={video.master_playlist_url}
-              poster=""
-              theme="dark"
-              icons={playerIcons}
-              videoContainerStyles={videoContainerStyles}
-              type="auto"
-              stableVolume={true}
-              controlSize={40}
-            />
-          ) : (
-            <div className="text-center text-white px-4">
-              <div className="mb-4">
-                <svg
-                  className="mx-auto h-16 w-16 text-gray-400"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                    d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
-                  />
-                </svg>
-              </div>
-              <p className="text-lg font-medium mb-2">
-                {video?.status === "processing" && "Video is being processed"}
-                {video?.status === "pending" &&
-                  "Video is queued for processing"}
-                {video?.status === "failed" && "Video processing failed"}
-                {!video && "Loading video..."}
-              </p>
-              <p className="text-sm text-gray-400">
-                {video?.status === "processing" &&
-                  "Transcoding in progress, please wait..."}
-                {video?.status === "pending" &&
-                  "Waiting for a worker to start processing"}
-                {video?.status === "failed" && "Check the error details below"}
-                {!video && "Fetching video information..."}
-              </p>
-            </div>
-          )}
+        <div className="aspect-video bg-black rounded-lg overflow-hidden flex items-center justify-center relative">
+          <CustomVideoPlayer
+            src={video.master_playlist_url ?? ""}
+            poster=""
+            theme="dark"
+            icons={playerIcons}
+            videoContainerStyles={videoContainerStyles}
+            type="auto"
+            stableVolume={true}
+            controlSize={40}
+          />
+          <Activity name="progress" mode={isCompleted ? "hidden" : "visible"}>
+            <VideoProgress video={video} />
+          </Activity>
         </div>
         <div className="mt-8">
           <div>
@@ -201,17 +127,18 @@ function VideoDetails({ videoPromise }: { videoPromise: Promise<Video> }) {
           </div>
         </div>
       </section>
-      <VideoProgress video={video} />
     </div>
   );
 }
 
 function VideoProgress({ video: loadedVideo }: { video: Video }) {
   const { videoId } = useParams<{ videoId: string }>();
-  const [video, setVideo] = useOptimistic<Video>(loadedVideo);
-  const [videoProgress, setVideoProgress] = useState<ProcessingProgress | null>(
-    null
-  );
+  const [, setVideo] = useOptimistic<Video>(loadedVideo);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string>();
+  // const [videoProgress, setVideoProgress] = useState<ProcessingProgress | null>(
+  //   null
+  // );
 
   useEffect(() => {
     if (typeof window === "undefined" || !("EventSource" in window)) {
@@ -222,17 +149,37 @@ function VideoProgress({ video: loadedVideo }: { video: Video }) {
 
     source.onmessage = (event) => {
       try {
-        const payload: ProcessingProgress = JSON.parse(event.data);
-        setVideoProgress(payload);
+        const payload = JSON.parse(event.data) as ProcessingProgress;
+        // setVideoProgress(payload);
         setVideo((prev) =>
           prev && prev.id === payload.video_id
             ? { ...prev, status: payload.status }
             : prev
         );
-        if (payload.status === "completed" || payload.status === "failed") {
-          loadVideoDetails(payload.video_id);
+        switch (payload.status) {
+          case "waiting":
+          case "started":
+            break;
+          case "processing":
+            setProgress(
+              ((payload?.processed_frames ?? 0) * 100) /
+                (payload?.total_frames ?? 1)
+            );
+            break;
+          case "completed":
+            setProgress(100);
+            break;
+          case "failed":
+            setError(payload.error);
+            break;
+          default:
+            break;
         }
+        // if (payload.status === "completed" || payload.status === "failed") {
+        //   loadVideoDetails(payload.video_id);
+        // }
       } catch (error) {
+        setError("Failed to parse SSE payload");
         console.error("Failed to parse SSE payload", error);
       }
     };
@@ -247,121 +194,12 @@ function VideoProgress({ video: loadedVideo }: { video: Video }) {
   }, [setVideo, videoId]);
 
   return (
-    <section>
-      <div className="details-grid">
-        <div className="panel detail-panel">
-          <h2>Job details</h2>
-          {video && (
-            <div className="detail-grid">
-              <div>
-                <p className="label">Video ID</p>
-                <p className="value mono">{video.id}</p>
-              </div>
-              <div>
-                <p className="label">Original name</p>
-                <p className="value">{video.original_name}</p>
-              </div>
-              <div>
-                <p className="label">S3 path</p>
-                <p className="value mono">{video.s3_path}</p>
-              </div>
-              <div>
-                <p className="label">Source dimensions</p>
-                <p className="value">
-                  {video.source_width && video.source_height
-                    ? `${video.source_width}×${video.source_height}`
-                    : "—"}
-                </p>
-              </div>
-              <div>
-                <p className="label">Duration</p>
-                <p className="value">{formatDuration(video.duration)}</p>
-              </div>
-              <div>
-                <p className="label">File size</p>
-                <p className="value">{formatBytes(video.file_size)}</p>
-              </div>
-              <div>
-                <p className="label">Created</p>
-                <p className="value">{formatDateTime(video.created_at)}</p>
-              </div>
-              <div>
-                <p className="label">Updated</p>
-                <p className="value">{formatDateTime(video.updated_at)}</p>
-              </div>
-              {video.completed_at && (
-                <div>
-                  <p className="label">Completed</p>
-                  <p className="value">{formatDateTime(video.completed_at)}</p>
-                </div>
-              )}
-              {video.error_message && (
-                <div className="full-width">
-                  <p className="label">Error</p>
-                  <p className="value error-text">{video.error_message}</p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="panel progress-panel">
-          <h2>Progress & renditions</h2>
-          {video && (
-            <>
-              <div className="progress-track">
-                <div
-                  className="progress-bar"
-                  style={{
-                    width: `${
-                      videoProgress?.progress ??
-                      (video.status === "completed" ? 100 : 0)
-                    }%`,
-                  }}
-                />
-              </div>
-              <div className="progress-meta">
-                <span
-                  className={`status-pill ${statusMeta[video.status].tone}`}
-                >
-                  {statusMeta[video.status].label}
-                </span>
-                <span>
-                  {videoProgress?.message || statusMeta[video.status].blurb}
-                </span>
-                {videoProgress?.current_resolution &&
-                  videoProgress?.total_resolutions && (
-                    <span>
-                      Rendition {videoProgress.current_resolution} /{" "}
-                      {videoProgress.total_resolutions}
-                    </span>
-                  )}
-              </div>
-              <div className="resolutions">
-                {video.resolutions && video.resolutions.length > 0 ? (
-                  video.resolutions.map((rendition) => (
-                    <article key={rendition.id} className="rendition-card">
-                      <header>
-                        <p className="primary">{rendition.height}p</p>
-                        <span className="secondary">
-                          {formatBytes(rendition.file_size)}
-                        </span>
-                      </header>
-                      <p className="mono">{rendition.s3_url}</p>
-                      <footer>
-                        <span>Bitrate: {rendition.bitrate} kbps</span>
-                        <span>{formatDateTime(rendition.processed_at)}</span>
-                      </footer>
-                    </article>
-                  ))
-                ) : (
-                  <p className="muted">No renditions reported yet.</p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+    <section className="absolute inset-0 grid place-items-center bg-black/75 text-white p-4">
+      {!error ? (
+        <CircularProgress value={progress} />
+      ) : (
+        <p className="font-mono text-center">{error}</p>
+      )}
     </section>
   );
 }
