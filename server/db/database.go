@@ -1,26 +1,25 @@
 package db
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
-	"os"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"github.com/devrayat000/video-process/models"
+	server_utils "github.com/devrayat000/video-process/utils"
 )
 
-var DB *sql.DB
+var (
+	dbHost = server_utils.GetEnv("DB_HOST", "localhost")
+	dbPort = server_utils.GetEnv("DB_PORT", "5555")
+	dbUser = server_utils.GetEnv("DB_USER", "user")
+	dbPass = server_utils.GetEnv("DB_PASSWORD", "password")
+	dbName = server_utils.GetEnv("DB_NAME", "videodb")
+)
 
 func InitDB() (*gorm.DB, error) {
-	dbHost := getEnv("DB_HOST", "postgres")
-	dbPort := getEnv("DB_PORT", "5432")
-	dbUser := getEnv("DB_USER", "postgres")
-	dbPass := getEnv("DB_PASSWORD", "postgres")
-	dbName := getEnv("DB_NAME", "video_processing")
-
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		dbHost, dbPort, dbUser, dbPass, dbName)
 
@@ -38,7 +37,6 @@ func InitDB() (*gorm.DB, error) {
 	if err = sqlDB.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-	DB = sqlDB
 
 	log.Println("Database connection established")
 
@@ -47,11 +45,4 @@ func InitDB() (*gorm.DB, error) {
 	}
 
 	return gormDB, nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
