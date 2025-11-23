@@ -11,8 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useNavigate } from "react-router";
-
-const API_BASE_URL = "http://localhost:8080";
+import { API_BASE_URL } from "@/lib/utils";
 
 type VideoStatus = "pending" | "processing" | "completed" | "failed";
 

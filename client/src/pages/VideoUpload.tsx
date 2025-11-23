@@ -16,8 +16,8 @@ import {
   useDropzone,
 } from "@/components/ui/dropzone";
 import { uploadFileToS3 } from "@/lib/s3";
-
-const API_BASE_URL = "http://localhost:8080";
+import type { VideoJob } from "@/types/video";
+import { API_BASE_URL } from "@/lib/utils";
 
 const safeUUID = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -41,18 +41,15 @@ const formatFileSize = (bytes: number): string => {
 };
 
 // Submit job to backend after upload
-const submitJobToBackend = async (
-  videoId: string,
-  originalName: string,
-  s3Path: string
-) => {
+const submitJobToBackend = async (params: VideoJob): Promise<string> => {
   const response = await fetch(`${API_BASE_URL}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      video_id: videoId,
-      original_name: originalName,
-      s3_path: s3Path,
+      video_id: params.id,
+      original_name: params.name,
+      s3_path: params.url,
+      content_type: params.type,
     }),
   });
 
@@ -62,7 +59,7 @@ const submitJobToBackend = async (
   }
 
   const result = await response.json();
-  return result.id || videoId;
+  return result.id || params.id;
 };
 
 export default function VideoUpload() {
@@ -91,14 +88,24 @@ export default function VideoUpload() {
         });
 
         // Submit job to backend
-        const jobId = await submitJobToBackend(videoId, file.name, s3Path);
-
-        toast.success(`Video uploaded and job ${jobId} queued successfully!`);
+        const toastId = toast.promise(
+          submitJobToBackend({
+            id: videoId,
+            name: file.name,
+            url: s3Path,
+            type: file.type,
+          }),
+          {
+            loading: "Uploading and submitting job...",
+            success: (jobId) =>
+              `Video uploaded and job ${jobId} queued successfully!`,
+          }
+        );
 
         return {
           status: "success",
           result: {
-            videoId: jobId,
+            videoId: await toastId.unwrap(),
             s3Path,
             originalName: file.name,
           },

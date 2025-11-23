@@ -13,52 +13,8 @@ import { useParams } from "react-router";
 import { CustomVideoPlayer } from "@ntxmjs/react-custom-video-player";
 import { playerIcons, videoContainerStyles } from "@/lib/videoPlayerConfig";
 import { CircularProgress } from "@/components/custom-ui/circular-progress";
-
-const API_BASE_URL = "http://localhost:8080";
-
-type VideoStatus =
-  | "waiting"
-  | "started"
-  | "processing"
-  | "completed"
-  | "failed";
-
-type Resolution = {
-  id: string;
-  height: number;
-  width: number;
-  s3_url: string;
-  bitrate: number;
-  file_size: number;
-  processed_at: string;
-};
-
-type Video = {
-  id: string;
-  original_name: string;
-  s3_path: string;
-  status: VideoStatus;
-  master_playlist_url?: string;
-  source_height?: number;
-  source_width?: number;
-  duration?: number;
-  frames?: number;
-  file_size?: number;
-  created_at: string;
-  updated_at: string;
-  completed_at?: string;
-  error_message?: string;
-  resolutions?: Resolution[];
-};
-
-type ProcessingProgress = {
-  video_id: string;
-  status: VideoStatus;
-  total_frames?: number;
-  processed_frames?: number;
-  error?: string;
-  timestamp: string;
-};
+import { API_BASE_URL } from "@/lib/utils";
+import type { ProcessingProgress, Video } from "@/types/video";
 
 const loadVideoDetails = cache(async (id: string) => {
   const response = await fetch(`${API_BASE_URL}/videos/${id}`);
