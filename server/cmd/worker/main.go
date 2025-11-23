@@ -218,6 +218,7 @@ type VideoMetadata struct {
 	Height   int
 	Duration float64
 	Bitrate  int
+	Frames   int
 }
 
 // getVideoMetadata uses ffprobe to extract video metadata
@@ -225,7 +226,7 @@ func getVideoMetadata(ctx context.Context, sourceURL string) (*VideoMetadata, er
 	args := []string{
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height,bit_rate:format=duration",
+		"-show_entries", "stream=width,height,bit_rate,nb_frames:format=duration",
 		"-of", "default=noprint_wrappers=1",
 		sourceURL,
 	}
@@ -237,9 +238,9 @@ func getVideoMetadata(ctx context.Context, sourceURL string) (*VideoMetadata, er
 	}
 
 	metadata := &VideoMetadata{}
-	lines := strings.Split(string(output), "\n")
+	lines := strings.SplitSeq(string(output), "\n")
 
-	for _, line := range lines {
+	for line := range lines {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			continue
@@ -257,6 +258,8 @@ func getVideoMetadata(ctx context.Context, sourceURL string) (*VideoMetadata, er
 			fmt.Sscanf(value, "%f", &metadata.Duration)
 		case "bit_rate":
 			fmt.Sscanf(value, "%d", &metadata.Bitrate)
+		case "nb_frames":
+			fmt.Sscanf(value, "%d", &metadata.Frames)
 		}
 	}
 
@@ -267,26 +270,22 @@ func getVideoMetadata(ctx context.Context, sourceURL string) (*VideoMetadata, er
 	return metadata, nil
 }
 
-// getRenditionPresets returns all available rendition presets
-func getRenditionPresets() []Rendition {
-	return []Rendition{
-		{Height: 2160, Bitrate: 16000, MaxRate: 17600, BufSize: 24000, AudioRate: 256}, // 4K UHD
-		{Height: 1440, Bitrate: 9000, MaxRate: 9900, BufSize: 13500, AudioRate: 256},   // 2K QHD
-		{Height: 1080, Bitrate: 5000, MaxRate: 5350, BufSize: 7500, AudioRate: 192},    // Full HD
-		{Height: 720, Bitrate: 2800, MaxRate: 2996, BufSize: 4200, AudioRate: 160},     // HD
-		{Height: 480, Bitrate: 1400, MaxRate: 1498, BufSize: 2100, AudioRate: 128},     // SD
-		{Height: 360, Bitrate: 800, MaxRate: 856, BufSize: 1200, AudioRate: 128},       // Low
-		{Height: 240, Bitrate: 500, MaxRate: 535, BufSize: 750, AudioRate: 96},         // Mobile
-		{Height: 144, Bitrate: 300, MaxRate: 321, BufSize: 450, AudioRate: 96},         // Ultra Low
-	}
+var renditions = []Rendition{
+	{Height: 2160, Bitrate: 16000, MaxRate: 17600, BufSize: 24000, AudioRate: 256}, // 4K UHD
+	{Height: 1440, Bitrate: 9000, MaxRate: 9900, BufSize: 13500, AudioRate: 256},   // 2K QHD
+	{Height: 1080, Bitrate: 5000, MaxRate: 5350, BufSize: 7500, AudioRate: 192},    // Full HD
+	{Height: 720, Bitrate: 2800, MaxRate: 2996, BufSize: 4200, AudioRate: 160},     // HD
+	{Height: 480, Bitrate: 1400, MaxRate: 1498, BufSize: 2100, AudioRate: 128},     // SD
+	{Height: 360, Bitrate: 800, MaxRate: 856, BufSize: 1200, AudioRate: 128},       // Low
+	{Height: 240, Bitrate: 500, MaxRate: 535, BufSize: 750, AudioRate: 96},         // Mobile
+	{Height: 144, Bitrate: 300, MaxRate: 321, BufSize: 450, AudioRate: 96},         // Ultra Low
 }
 
 // filterRenditions selects renditions that don't exceed the source height
 func filterRenditions(sourceHeight int) []Rendition {
-	allRenditions := getRenditionPresets()
 	var selected []Rendition
 
-	for _, r := range allRenditions {
+	for _, r := range renditions {
 		if r.Height <= sourceHeight {
 			selected = append(selected, r)
 		}
@@ -295,7 +294,13 @@ func filterRenditions(sourceHeight int) []Rendition {
 	// If source is smaller than smallest preset, create a custom rendition
 	if len(selected) == 0 {
 		selected = []Rendition{
-			{Height: sourceHeight, Bitrate: sourceHeight * 2, MaxRate: sourceHeight*2 + 200, BufSize: sourceHeight * 3, AudioRate: 96},
+			{
+				Height:    sourceHeight,
+				Bitrate:   sourceHeight * 2,
+				MaxRate:   sourceHeight*2 + 200,
+				BufSize:   sourceHeight * 3,
+				AudioRate: 96,
+			},
 		}
 	}
 
