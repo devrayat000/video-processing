@@ -40,7 +40,7 @@ func InitDB() (*gorm.DB, error) {
 
 	log.Println("Database connection established")
 
-	if err = gormDB.AutoMigrate(&models.Video{}, &models.VideoResolution{}, &models.ProcessingProgress{}); err != nil {
+	if err = gormDB.AutoMigrate(&models.Video{}, &models.VideoResolution{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database schema: %w", err)
 	}
 

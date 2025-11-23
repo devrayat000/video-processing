@@ -9,7 +9,8 @@ import (
 type VideoStatus string
 
 const (
-	StatusPending    VideoStatus = "pending"
+	StatusWaiting    VideoStatus = "waiting"
+	StatusStarted    VideoStatus = "started"
 	StatusProcessing VideoStatus = "processing"
 	StatusCompleted  VideoStatus = "completed"
 	StatusFailed     VideoStatus = "failed"
@@ -23,6 +24,7 @@ type Video struct {
 	SourceHeight      int               `json:"source_height" db:"source_height" gorm:"column:source_height;not null"`
 	SourceWidth       int               `json:"source_width" db:"source_width" gorm:"column:source_width;not null"`
 	Duration          float64           `json:"duration" db:"duration" gorm:"column:duration;type:double precision;not null"`
+	Frames            int64             `json:"frames" db:"frames" gorm:"column:frames"`
 	FileSize          int64             `json:"file_size" db:"file_size" gorm:"column:file_size;type:bigint;not null"`
 	MasterPlaylistKey *string           `json:"master_playlist_key" db:"master_playlist_key" gorm:"column:master_playlist_key;type:text"`
 	MasterPlaylistURL *string           `json:"master_playlist_url" db:"master_playlist_url" gorm:"column:master_playlist_url;type:text"`
@@ -46,13 +48,12 @@ type VideoResolution struct {
 }
 
 type ProcessingProgress struct {
-	VideoID           uuid.UUID   `json:"video_id" gorm:"column:video_id;type:uuid;index"`
-	Status            VideoStatus `json:"status" gorm:"column:status;type:varchar(32);not null"`
-	CurrentResolution int         `json:"current_resolution,omitempty" gorm:"column:current_resolution"`
-	TotalResolutions  int         `json:"total_resolutions,omitempty" gorm:"column:total_resolutions"`
-	Progress          int         `json:"progress" gorm:"column:progress;not null"`
-	Message           *string     `json:"message" gorm:"column:message;type:text"`
-	Timestamp         time.Time   `json:"timestamp" gorm:"column:timestamp;autoCreateTime"`
+	VideoID         uuid.UUID   `json:"video_id"`
+	Status          VideoStatus `json:"status"`
+	TotalFrames     int64       `json:"total_frames,omitempty"`
+	ProcessedFrames int64       `json:"processed_frames,omitempty"`
+	Error           string      `json:"error,omitempty"`
+	Timestamp       time.Time   `json:"timestamp"`
 }
 
 type VideoJob struct {

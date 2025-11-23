@@ -49,7 +49,7 @@ func main() {
 			ID:           job.VideoID,
 			OriginalName: job.OriginalName,
 			S3Path:       job.S3Path,
-			Status:       models.StatusPending,
+			Status:       models.StatusWaiting,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
 		}

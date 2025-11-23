@@ -29,7 +29,6 @@ var (
 )
 
 func InitRedis() error {
-
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
 		Password: redisPass,

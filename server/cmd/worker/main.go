@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -108,6 +109,11 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 
 	log.Printf(" [>] Processing video_id=%s source=%s", job.VideoID, job.S3Path)
 
+	video := &models.Video{
+		ID:     job.VideoID,
+		S3Path: job.S3Path,
+	}
+
 	// Update status to processing
 	_, err := gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
 		Status:       models.StatusProcessing,
@@ -117,13 +123,10 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 		log.Printf(" [!] Failed to update status: %v", err)
 	}
 
-	// Publish initial progress
-	message := "Starting video processing..."
+	// Publish initial progress snapshot
 	pubsub.PublishProgress(models.ProcessingProgress{
 		VideoID:   job.VideoID,
-		Status:    models.StatusProcessing,
-		Progress:  0,
-		Message:   &message,
+		Status:    models.StatusStarted,
 		Timestamp: time.Now(),
 	})
 
@@ -136,24 +139,27 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 			ErrorMessage: &errorMessage,
 		})
 
-		message := fmt.Sprintf("Failed to read video metadata: %v", err)
+		errorMsg := fmt.Sprintf("Failed to read video metadata: %v", err)
 		pubsub.PublishProgress(models.ProcessingProgress{
 			VideoID:   job.VideoID,
 			Status:    models.StatusFailed,
-			Progress:  0,
-			Message:   &message,
+			Error:     errorMsg,
 			Timestamp: time.Now(),
 		})
 		return fmt.Errorf("failed to get video metadata: %w", err)
 	}
 	log.Printf(" [i] Source video: %dx%d, duration: %.2fs", metadata.Width, metadata.Height, metadata.Duration)
 
-	// Update video metadata in database
-	_, err = gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
+	video = &models.Video{
+		ID:           video.ID,
+		S3Path:       video.S3Path,
+		Frames:       metadata.Frames,
 		SourceWidth:  metadata.Width,
 		SourceHeight: metadata.Height,
 		Duration:     metadata.Duration,
-	})
+	}
+	// Update video metadata in database
+	_, err = gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, *video)
 	if err != nil {
 		log.Printf(" [!] Failed to update metadata: %v", err)
 	}
@@ -162,18 +168,14 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 	renditions := filterRenditions(metadata.Height)
 	log.Printf(" [i] Generating %d renditions: %v", len(renditions), getRenditionHeights(renditions))
 
-	message = fmt.Sprintf("Processing %d renditions...", len(renditions))
 	pubsub.PublishProgress(models.ProcessingProgress{
-		VideoID:          job.VideoID,
-		Status:           models.StatusProcessing,
-		TotalResolutions: len(renditions),
-		Progress:         5,
-		Message:          &message,
-		Timestamp:        time.Now(),
+		VideoID:   job.VideoID,
+		Status:    models.StatusProcessing,
+		Timestamp: time.Now(),
 	})
 
 	// Transcode all renditions in a single FFmpeg command
-	err = transcodeToHLSBatch(ctx, mc, gormDB, job, renditions)
+	err = transcodeToHLSBatch(ctx, mc, gormDB, *video, renditions)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to transcode video: %v", err)
 		gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
@@ -183,8 +185,7 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 		pubsub.PublishProgress(models.ProcessingProgress{
 			VideoID:   job.VideoID,
 			Status:    models.StatusFailed,
-			Progress:  50,
-			Message:   &errMsg,
+			Error:     errMsg,
 			Timestamp: time.Now(),
 		})
 		return fmt.Errorf("%s", errMsg)
@@ -204,8 +205,6 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 	pubsub.PublishProgress(models.ProcessingProgress{
 		VideoID:   job.VideoID,
 		Status:    models.StatusCompleted,
-		Progress:  100,
-		Message:   ptr("Processing completed successfully!"),
 		Timestamp: time.Now(),
 	})
 
@@ -218,7 +217,7 @@ type VideoMetadata struct {
 	Height   int
 	Duration float64
 	Bitrate  int
-	Frames   int
+	Frames   int64
 }
 
 // getVideoMetadata uses ffprobe to extract video metadata
@@ -317,9 +316,9 @@ func getRenditionHeights(renditions []Rendition) []int {
 }
 
 // transcodeToHLSBatch transcodes all renditions in a single FFmpeg command
-func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, job models.VideoJob, renditions []Rendition) error {
+func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, video models.Video, renditions []Rendition) error {
 	// Create temporary directory for HLS output
-	tempDir := fmt.Sprintf("/tmp/%s", job.VideoID)
+	tempDir := fmt.Sprintf("/tmp/%s", video.ID)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -347,8 +346,10 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 	// -------- BUILD FFMPEG ARGS --------
 	args := []string{
 		"-y",
+		"-v", "error",
 		"-fflags", "+discardcorrupt",
-		"-i", job.S3Path,
+		"-i", video.S3Path,
+		"-progress", "pipe:1",
 		"-filter_complex", filterComplex,
 	}
 
@@ -410,16 +411,25 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 	// Monitor FFmpeg progress in background
 	go monitorFFmpegProgressBatch(ffmpegStderr)
 
+	ffmpegStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe error: %w", err)
+	}
+
+	// Publish progress from stdout
+	go func() {
+		publishProgress(video, ffmpegStdout)
+	}()
+
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg execution error: %w", err)
 	}
 
-	log.Printf(" [√] FFmpeg transcoding completed for video_id=%s", job.VideoID)
+	log.Printf(" [√] FFmpeg transcoding completed for video_id=%s", video.ID)
 
 	// -------- UPLOAD MASTER PLAYLIST FIRST --------
 	masterPlaylistPath := fmt.Sprintf("%s/master.m3u8", tempDir)
-	masterPlaylistKey := fmt.Sprintf("%s/processed/master.m3u8", job.VideoID)
-
+	masterPlaylistKey := fmt.Sprintf("%s/processed/master.m3u8", video.ID)
 	masterFile, err := os.Open(masterPlaylistPath)
 	if err != nil {
 		return fmt.Errorf("failed to open master playlist: %w", err)
@@ -444,7 +454,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 	masterURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, masterPlaylistKey)
 
 	// Update video record with master playlist info
-	gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
+	gorm.G[models.Video](gormDB).Where("id = ?", video.ID).Updates(ctx, models.Video{
 		MasterPlaylistKey: ptr(masterPlaylistKey),
 		MasterPlaylistURL: ptr(masterURL),
 	})
@@ -473,7 +483,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 			}
 
 			filePath := fmt.Sprintf("%s/%s", streamDir, file.Name())
-			s3Key := fmt.Sprintf("%s/processed/%s/%s", job.VideoID, streamName, file.Name())
+			s3Key := fmt.Sprintf("%s/processed/%s/%s", video.ID, streamName, file.Name())
 
 			fileHandle, err := os.Open(filePath)
 			if err != nil {
@@ -507,7 +517,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 		log.Printf(" [>] Uploaded %d segments for %s", segmentCount, resolutionName)
 
 		// Construct permanent S3 URL for playlist
-		playlistS3Key := fmt.Sprintf("%s/processed/%s/playlist.m3u8", job.VideoID, streamName)
+		playlistS3Key := fmt.Sprintf("%s/processed/%s/playlist.m3u8", video.ID, streamName)
 		playlistURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, playlistS3Key)
 
 		// Calculate bandwidth (convert kbps to bps)
@@ -516,7 +526,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 		// Save resolution to database
 		resolution := &models.VideoResolution{
 			ID:            uuid.New(),
-			VideoID:       job.VideoID,
+			VideoID:       video.ID,
 			Resolution:    resolutionName,
 			PlaylistS3Key: playlistS3Key,
 			PlaylistURL:   playlistURL,
@@ -530,22 +540,40 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 		if err != nil {
 			log.Printf(" [!] Failed to save resolution to database: %v", err)
 		}
-
-		// Publish progress for this rendition
-		progressPercent := 10 + ((i+1)*80)/len(renditions)
-		message := fmt.Sprintf("Uploaded %s (%d/%d)", resolutionName, i+1, len(renditions))
-		pubsub.PublishProgress(models.ProcessingProgress{
-			VideoID:           job.VideoID,
-			Status:            models.StatusProcessing,
-			CurrentResolution: r.Height,
-			TotalResolutions:  len(renditions),
-			Progress:          progressPercent,
-			Message:           &message,
-			Timestamp:         time.Now(),
-		})
 	}
 
 	return nil
+}
+
+func publishProgress(video models.Video, stdout io.ReadCloser) {
+	defer stdout.Close()
+
+	scanner := bufio.NewScanner(stdout)
+	progressRegex := regexp.MustCompile(`frames=(\d+)`)
+
+	for scanner.Scan() {
+		// frames=1234
+		line := scanner.Text()
+
+		matches := progressRegex.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			framesStr := matches[1]
+			frames, err := strconv.ParseInt(framesStr, 10, 64)
+
+			if err != nil {
+				log.Printf("Error parsing frames: %v", err)
+				continue
+			}
+
+			pubsub.PublishProgress(models.ProcessingProgress{
+				VideoID:         video.ID,
+				Status:          models.StatusProcessing,
+				ProcessedFrames: frames,
+				TotalFrames:     video.Frames,
+				Timestamp:       time.Now(),
+			})
+		}
+	}
 }
 
 func monitorFFmpegProgressBatch(stderr io.ReadCloser) {
