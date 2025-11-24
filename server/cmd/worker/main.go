@@ -550,30 +550,37 @@ func publishProgress(video models.Video, stdout io.ReadCloser) {
 	defer stdout.Close()
 
 	scanner := bufio.NewScanner(stdout)
-	progressRegex := regexp.MustCompile(`frames=(\d+)`)
 
 	for scanner.Scan() {
 		// frames=1234
 		line := scanner.Text()
 
-		matches := progressRegex.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			framesStr := matches[1]
-			frames, err := strconv.ParseInt(framesStr, 10, 64)
-
-			if err != nil {
-				log.Printf("Error parsing frames: %v", err)
-				continue
-			}
-
-			pubsub.PublishProgress(models.ProcessingProgress{
-				VideoID:         video.ID,
-				Status:          models.StatusProcessing,
-				ProcessedFrames: frames,
-				TotalFrames:     video.Frames,
-				Timestamp:       time.Now(),
-			})
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
 		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if key != "frame" {
+			continue
+		}
+
+		frames, err := strconv.ParseInt(value, 10, 64)
+
+		if err != nil {
+			log.Printf("Error parsing frames: %v", err)
+			continue
+		}
+
+		pubsub.PublishProgress(models.ProcessingProgress{
+			VideoID:         video.ID,
+			Status:          models.StatusProcessing,
+			ProcessedFrames: frames,
+			TotalFrames:     video.Frames,
+			Timestamp:       time.Now(),
+		})
 	}
 }
 
