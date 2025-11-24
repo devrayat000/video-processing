@@ -64,7 +64,7 @@ services:
       - minio
     entrypoint: >
       /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc alias set myminio http://host.docker.internal:9000 minioadmin minioadmin;
       /usr/bin/mc mb myminio/videos;
       /usr/bin/mc anonymous set download myminio/videos;
       exit 0;
