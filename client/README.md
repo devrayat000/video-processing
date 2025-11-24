@@ -21,11 +21,55 @@ The UI assumes the Go API in `../server` is running locally on `http://localhost
 
 No client commands were executed as part of these updates per the project guidelines.
 
-## Development notes
+## Local setup
 
-1. Install dependencies in `/client` (Vite + React) if you have not already.
-2. Run the API server first so the UI can successfully fetch `/videos` and subscribe to `/progress`.
-3. Start the Vite dev server (`npm run dev` or equivalent) and open the provided URL.
-4. Queue jobs via the form and keep this page open to watch status changes in real time.
+1. Start the backend stack from the repo root:
+
+   ```bash
+   docker compose -f docker-compose.basic.yaml -f docker-compose.yaml up -d --build
+   ```
+
+   (or run `docker compose -f docker-compose.basic.yaml up -d` plus local `go run` processes if you prefer to iterate outside containers.)
+
+2. Navigate to the client folder and install dependencies:
+
+   ```bash
+   cd client
+   npm install
+   ```
+
+3. (Optional) Create `.env.local` to override API/S3 targets. At minimum set the API host if it differs from the default `http://localhost:8000`:
+
+   ```bash
+   VITE_API_BASE_URL=http://localhost:8080
+   VITE_AWS_REGION=us-east-1
+   VITE_AWS_ACCESS_KEY_ID=minioadmin
+   VITE_AWS_SECRET_ACCESS_KEY=minioadmin
+   VITE_AWS_S3_ENDPOINT=http://localhost:9000
+   VITE_AWS_S3_BUCKET=videos
+   ```
+
+4. Run the dev server:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open the printed Vite URL (typically `http://localhost:5173`). Submitting a job requires the API to be reachable and (if you enable uploads) the MinIO credentials above to resolve.
+
+## Useful npm scripts
+
+- `npm run dev` – Vite dev server with hot reloading.
+- `npm run build` – Production build output to `dist/`.
+- `npm run preview` – Serve the built bundle locally for smoke tests.
+- `npm run lint` – Run the configured ESLint rules.
+
+## Troubleshooting
+
+- **API requests fail with `ECONNREFUSED`**: confirm the Go API is running on `http://localhost:8080` or set `VITE_API_BASE_URL` accordingly.
+- **Uploads disabled warning**: populate all `VITE_AWS_*` variables so the S3 helper can generate pre-signed URLs.
+- **Stale data**: the dashboard polls `/videos` every load. Use the refresh button or hard reload if you start the API after the client.
+
+Queue jobs via the form and keep this page open to watch status changes in real time.
 
 Feel free to extend the layout with charts, historical stats, or authentication hooks as your backend evolves.

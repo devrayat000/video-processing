@@ -2,71 +2,88 @@
 
 ## Overview
 
-YouTube-like video processing system using Redis Streams for job queue, PostgreSQL for persistence, MinIO for storage, and FFmpeg for transcoding.
+YouTube-like video processing system using Redis Streams for job orchestration, PostgreSQL for persistence, MinIO for storage, and FFmpeg for transcoding.
 
 ## Why Redis Instead of RabbitMQ?
 
-**Single Service, Multiple Use Cases:**
-- ✅ **Message Queue** - Redis Streams with consumer groups
-- ✅ **Pub/Sub** - Real-time progress updates
-- ✅ **Caching** - Video metadata and progress state
-- ✅ **Atomic Operations** - Built-in support
+### Single Service, Multiple Use Cases
 
-**Benefits:**
+- ✅ **Message Queue** – Redis Streams with consumer groups
+- ✅ **Pub/Sub** – Real-time progress updates
+- ✅ **Caching** – Video metadata and progress state
+- ✅ **Atomic Operations** – Built-in support
+
+### Benefits
+
 - Reduced infrastructure complexity (3 services instead of 4)
 - Lower memory footprint
 - Unified monitoring and management
-- Redis Streams provide durable, ordered message delivery
-- Consumer groups ensure work distribution
+- Durable, ordered message delivery
 - Automatic redelivery of unacknowledged messages
 
 ## System Components
 
 ### 1. Redis (Port 6379)
+
 **Role:** Message queue, pub/sub, caching
 
-**Streams:**
-- `video:jobs` - Job queue for video processing
+#### Streams
+
+- `video:jobs` – Durable job queue
   - Consumer group: `video-workers`
-  - Persistent, ordered delivery
-  - Automatic retries for failed jobs
+  - Guarantees ordered delivery
+  - Includes automatic retry via pending entries
 
-**Pub/Sub Channels:**
-- `video:progress:{video_id}` - Per-video progress updates
-- `video:progress:all` - Global progress feed
+#### Pub/Sub Channels
 
-**Keys:**
-- `progress:{video_id}` - Current progress state (24h TTL)
+- `video:progress:{video_id}` – Per-video progress updates
+- `video:progress:all` – Global progress feed used by dashboards
 
-### 2. PostgreSQL (Port 5432)
+#### Keys
+
+- `progress:{video_id}` – Current progress snapshot (24h TTL)
+
+### 2. PostgreSQL (Port 5432 / Host 5555)
+
 **Role:** Persistent video metadata storage
 
-**Tables:**
-- `videos` - Source video information, status, metadata
-- `resolutions` - Generated resolution details, URLs
+**Compose defaults:** database `videodb`, user `user`, password `password` (see `docker-compose.basic.yaml`).
+
+#### Tables
+
+- `videos` – Source video information, status, metadata
+- `resolutions` – Generated resolution details, URLs
 
 ### 3. MinIO (Ports 9000, 9001)
+
 **Role:** S3-compatible object storage
 
-**Buckets:**
-- `videos/source/` - Original uploads
-- `videos/processed/` - Transcoded resolutions
+**Compose defaults:** `minioadmin / minioadmin` credentials; console exposed on `http://localhost:9001`.
+
+#### Buckets
+
+- `videos/source/` – Original uploads
+- `videos/processed/` – Transcoded resolutions
 
 ### 4. API Server (Port 8080)
+
 **Role:** REST API and SSE endpoints
 
-**Endpoints:**
-- `POST /jobs` - Submit video processing job
-- `GET /videos` - List all videos
-- `GET /videos/{id}` - Get video details
-- `GET /progress/{id}` - SSE stream for video progress
-- `GET /progress` - SSE stream for all progress
-- `GET /healthz` - Health check
+#### Endpoints
+
+- `POST /jobs` – Submit video processing job
+- `GET /videos` – List all videos
+- `GET /videos/{id}` – Get video details
+- `GET /progress/{id}` – SSE stream for video progress
+- `GET /progress` – SSE stream for all progress
+- `GET /healthz` – Health check
 
 ### 5. Worker
+
 **Role:** Consumes jobs from Redis, transcodes videos
 
-**Process:**
+#### Process
+
 1. Read job from Redis Stream (`XREADGROUP`)
 2. Update video status to `processing`
 3. Probe video metadata with `ffprobe`
@@ -77,9 +94,15 @@ YouTube-like video processing system using Redis Streams for job queue, PostgreS
 8. Publish progress via Redis pub/sub
 9. Acknowledge message (`XACK`)
 
+### Docker Compose Layout
+
+- `docker-compose.basic.yaml` – Infrastructure only (PostgreSQL, Redis, MinIO, bucket bootstrapper). Creates/uses the `devcontainer_default` bridge network and exposes Postgres on host `5555`, Redis on `6379`, and MinIO on `9000/9001`.
+- `docker-compose.yaml` – API + worker images. Combine with the base file via `docker compose -f docker-compose.basic.yaml -f docker-compose.yaml up -d --build`.
+- `client/.env` – Points to `host.docker.internal` so the Vite dev server can call the containers while running in the host browser.
+
 ## Data Flow
 
-```
+```text
 ┌─────────────┐
 │   Client    │
 │  (Upload)   │
@@ -123,7 +146,7 @@ YouTube-like video processing system using Redis Streams for job queue, PostgreS
 ## Redis Streams vs RabbitMQ
 
 | Feature | Redis Streams | RabbitMQ |
-|---------|--------------|----------|
+| --- | --- | --- |
 | Persistence | ✅ AOF/RDB | ✅ Durable queues |
 | Ordering | ✅ Guaranteed | ✅ Per queue |
 | Consumer Groups | ✅ Built-in | ✅ Competing consumers |
@@ -136,21 +159,24 @@ YouTube-like video processing system using Redis Streams for job queue, PostgreS
 ## Scaling Considerations
 
 ### Horizontal Scaling
-**Workers:**
-- Multiple worker containers automatically join `video-workers` consumer group
-- Redis distributes jobs among consumers
-- Each job processed by exactly one worker
 
-**API Servers:**
-- Stateless design allows multiple instances
-- Load balance with Nginx/HAProxy
-- SSE connections distributed across instances
+#### Workers
+
+- Multiple worker containers automatically join `video-workers`
+- Redis balances work across the consumer group
+- Each job is processed exactly once before `XACK`
+
+#### API Servers
+
+- Stateless handlers allow horizontal scaling behind Nginx/HAProxy
+- SSE connections can be fanned out via sticky sessions or shared Redis subscriptions
 
 ### Performance Tuning
 
-**Redis:**
+#### Redis
+
 ```bash
-# Increase max memory
+# Increase maxmemory
 maxmemory 4gb
 maxmemory-policy allkeys-lru
 
@@ -159,13 +185,15 @@ appendonly yes
 appendfsync everysec
 ```
 
-**Worker:**
-```yaml
+#### Worker
+
+```bash
 # Scale workers
-docker-compose up --scale worker=5
+docker compose up --scale worker=5
 ```
 
-**FFmpeg:**
+#### FFmpeg
+
 ```bash
 # Adjust preset for speed vs quality
 -preset ultrafast   # Fastest, lower quality
@@ -176,18 +204,20 @@ docker-compose up --scale worker=5
 ## Monitoring
 
 ### Redis CLI
+
 ```bash
-# Monitor stream length
+# Stream length
 redis-cli XLEN video:jobs
 
-# Check pending messages
+# Pending messages
 redis-cli XPENDING video:jobs video-workers
 
-# Monitor pub/sub
+# Pub/sub fan-out
 redis-cli PSUBSCRIBE 'video:progress:*'
 ```
 
 ### Database Queries
+
 ```sql
 -- Active jobs
 SELECT COUNT(*) FROM videos WHERE status = 'processing';
@@ -201,79 +231,73 @@ FROM videos WHERE status = 'completed';
 ```
 
 ### MinIO
+
 ```bash
-# Check bucket size
+# Bucket size
 mc du local/videos
 
-# List recent uploads
+# Recent uploads
 mc ls --recursive local/videos/processed/
 ```
 
 ## Error Handling
 
 ### Worker Failures
-- Jobs remain in Redis Stream pending list
-- Unacknowledged messages auto-retry
-- Dead letter handling via XCLAIM for stuck jobs
+
+- Jobs remain in the Redis pending list
+- `XCLAIM` enables dead-letter style recovery for stuck messages
+- Automatic retries occur when workers restart
 
 ### Database Failures
-- Worker marks video as `failed` with error message
-- Frontend displays error to user
-- Manual retry via re-enqueuing job
+
+- Worker marks video as `failed` with an error message
+- API surfaces the error to the frontend
+- Operators can re-enqueue by calling `POST /jobs` again
 
 ### MinIO Failures
-- Worker retries upload with exponential backoff
-- Partial uploads cleaned via MinIO lifecycle policies
+
+- Worker retries uploads with exponential backoff
+- Partial objects are cleaned via lifecycle policies
+- For hard failures, the job is marked as `failed`
 
 ## Security
 
-**Redis:**
-- Enable AUTH with password
-- Use TLS for production
-- Network isolation via Docker networks
+### Redis
 
-**PostgreSQL:**
-- Strong password
-- Limited user permissions
-- Connection pooling with pgBouncer
+- Enable AUTH with strong passwords
+- Use TLS for production clusters
+- Keep instances on private networks
 
-**MinIO:**
-- Pre-signed URLs with expiration
-- Bucket policies for access control
-- TLS encryption
+### PostgreSQL
+
+- Enforce strong credentials and least-privilege roles
+- Consider pgBouncer for pooled connections
+- Enable automated backups
+
+### MinIO
+
+- Use pre-signed URLs with short expirations
+- Restrict bucket policies to required prefixes
+- Enable TLS or place behind a TLS-terminating proxy
 
 ## Development vs Production
 
-**Development (docker-compose.yaml):**
-- All services on single host
-- No TLS
-- Default credentials
-- Persistent volumes
+### Development (docker-compose)
 
-**Production:**
-- Managed Redis (AWS ElastiCache, Redis Cloud)
+- All services run on a single host
+- Default credentials checked into `.env`
+- No TLS, volumes persist between restarts
+
+### Production
+
+- Managed Redis (ElastiCache, Redis Cloud)
 - Managed PostgreSQL (RDS, Cloud SQL)
-- S3 instead of MinIO
-- Kubernetes for orchestration
-- Horizontal Pod Autoscaling
-- Monitoring (Prometheus, Grafana)
-- Logging (ELK stack)
+- AWS S3 / GCS instead of MinIO
+- Kubernetes for orchestration + HPA for autoscaling
+- Centralized metrics (Prometheus/Grafana) and logging (ELK, Loki)
 
 ## Next Steps
 
-1. **Frontend Development**
-   - React/Vue.js upload interface
-   - Video player with resolution selector
-   - Real-time progress bars
-
-2. **Advanced Features**
-   - HLS/DASH adaptive streaming
-   - Thumbnail generation
-   - Subtitle support
-   - CDN integration
-
-3. **Production Hardening**
-   - Rate limiting
-   - Authentication/Authorization
-   - Webhook notifications
-   - Detailed analytics
+1. **Frontend Enhancements** – richer analytics, adaptive streaming UI, operator alerts.
+2. **Advanced Media Features** – HLS/DASH packaging, thumbnail sprites, subtitle ingestion.
+3. **Production Hardening** – authentication/authorization, rate limiting, webhook notifications, SLA dashboards.
