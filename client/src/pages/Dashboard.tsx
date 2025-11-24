@@ -29,11 +29,11 @@ export default function Dashboard() {
     <main className="app-shell">
       <section className="grid">
         <div className="panel list-panel">
-          <div className="panel-header">
+          <div className="panel-header my-5 flex items-center justify-end">
             <Button
               type="button"
               variant="outline"
-              size="sm"
+              size="default"
               onClick={() => navigate(0)}
               // disabled={loadingList}
             >
@@ -41,57 +41,9 @@ export default function Dashboard() {
             </Button>
           </div>
 
-          {/* {listError && <p className="error">{listError}</p>}
-          {loadingList ? (
-            <div className="skeleton">Loading jobs…</div>
-          ) : videos.length === 0 ? (
-            <div className="empty-state">
-              <p>No jobs yet.</p>
-              <span>Submit a video to get started.</span>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Video</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Size</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>Created</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {videos.map((video) => (
-                  <TableRow
-                    key={video.id}
-                    onClick={() => navigate(`/videos/${video.id}`)}
-                    className="cursor-pointer"
-                  >
-                    <TableCell>
-                      <p className="primary">
-                        {video.original_name || video.id}
-                      </p>
-                      <span className="secondary">{video.id}</span>
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className={`status-pill ${
-                          statusMeta[video.status].tone
-                        }`}
-                      >
-                        {statusMeta[video.status].label}
-                      </span>
-                    </TableCell>
-                    <TableCell>{formatBytes(video.file_size)}</TableCell>
-                    <TableCell>{formatDuration(video.duration)}</TableCell>
-                    <TableCell>{formatDateTime(video.created_at)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )} */}
+          {/* {listError && <p className="error">{listError}</p>} */}
 
-          <Suspense>
+          <Suspense fallback={<div className="p-4">Loading videos...</div>}>
             <VideoList videosPromise={loadVideos()} />
           </Suspense>
         </div>
@@ -103,8 +55,12 @@ export default function Dashboard() {
 function VideoList({ videosPromise }: { videosPromise: Promise<Video[]> }) {
   const videos = use(videosPromise);
 
+  if (videos.length === 0) {
+    return <p className="p-4">No videos found.</p>;
+  }
+
   return (
-    <section>
+    <section className="flex flex-col gap-y-4">
       {videos.map((video) => {
         return <VideoItem key={video.id} video={video} />;
       })}
@@ -116,7 +72,7 @@ function VideoItem({ video }: { video: Video }) {
   return (
     <Item variant="outline" asChild role="listitem">
       <Link to={`/videos/${video.id}`}>
-        <ItemMedia variant="image">
+        <ItemMedia variant="image" className="h-40 w-auto aspect-video">
           <video controls={false} aria-disabled className="rounded-sm">
             <source src={video.s3_path} type={video.content_type} />
           </video>
