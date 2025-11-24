@@ -3,11 +3,13 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 
 // Configure S3 client with environment variables
-const createS3Client = () => {
-  const region = import.meta.env.VITE_AWS_REGION;
-  const accessKeyId = import.meta.env.VITE_AWS_ACCESS_KEY_ID;
-  const secretAccessKey = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY;
+const region = import.meta.env.VITE_AWS_REGION;
+const accessKeyId = import.meta.env.VITE_AWS_ACCESS_KEY_ID;
+const secretAccessKey = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY;
+const endpoint = import.meta.env.VITE_AWS_S3_ENDPOINT;
+const bucket = import.meta.env.VITE_AWS_S3_BUCKET;
 
+const createS3Client = () => {
   // If credentials are not provided, return a client that will fail gracefully
   if (!region || !accessKeyId || !secretAccessKey) {
     console.warn(
@@ -17,7 +19,7 @@ const createS3Client = () => {
 
   return new S3Client({
     region: region || "us-east-1",
-    endpoint: "http://host.docker.internal:9000",
+    endpoint: endpoint,
     forcePathStyle: true,
     credentials:
       accessKeyId && secretAccessKey
@@ -80,7 +82,6 @@ export const hasAwsCredentials = (): boolean => {
  * Get the configured S3 bucket name from environment variables
  */
 export const getS3Bucket = (): string => {
-  const bucket = import.meta.env.VITE_AWS_S3_BUCKET;
   if (!bucket) {
     throw new Error(
       "S3 bucket not configured. Please set VITE_AWS_S3_BUCKET in your .env file"
@@ -135,7 +136,7 @@ export const uploadFileToS3 = async (
     await upload.done();
 
     // Return the S3 URL
-    return `http://host.docker.internal:9000/${bucket}/${key}`;
+    return `${endpoint}/${bucket}/${key}`;
   } catch (error) {
     console.error("Failed to upload file to S3:", error);
     throw error;

@@ -87,7 +87,7 @@ function VideoItem({ video }: { video: Video }) {
 
               // seconds: "2-digit",
             }).format({
-              seconds: parseInt(video.duration),
+              seconds: Math.floor(video.duration ?? 0),
             })}
           </ItemDescription>
         </ItemContent>

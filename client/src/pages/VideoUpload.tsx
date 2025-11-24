@@ -12,12 +12,12 @@ import {
   DropzoneRemoveFile,
   DropzoneRetryFile,
   DropzoneTrigger,
-  InfiniteProgress,
   useDropzone,
 } from "@/components/ui/dropzone";
 import { uploadFileToS3 } from "@/lib/s3";
 import type { VideoJob } from "@/types/video";
 import { API_BASE_URL } from "@/lib/utils";
+import { Progress } from "@/components/ui/progress";
 
 const safeUUID = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -105,7 +105,7 @@ export default function VideoUpload() {
         return {
           status: "success",
           result: {
-            videoId: await toastId.unwrap(),
+            videoId: (await toastId.unwrap()) ?? videoId,
             s3Path,
             originalName: file.name,
           },
@@ -177,7 +177,9 @@ export default function VideoUpload() {
                 </h3>
                 <DropzoneFileList>
                   {dropzone.fileStatuses.map((file) => {
-                    const progress = uploadProgress[file.id] || 0;
+                    const progress =
+                      uploadProgress[file.result?.videoId ?? file.id] || 0;
+                    console.log(file);
                     const isPending = file.status === "pending";
                     const isSuccess = file.status === "success";
                     const isError = file.status === "error";
@@ -204,24 +206,12 @@ export default function VideoUpload() {
                                 ` • ${progress}% uploaded`}
                               {isSuccess && " • Upload complete"}
                             </p>
-                            {isPending && (
-                              <InfiniteProgress
-                                status="pending"
-                                className="mb-2"
-                              />
-                            )}
-                            {isSuccess && (
-                              <InfiniteProgress
-                                status="success"
-                                className="mb-2"
-                              />
-                            )}
-                            {isError && (
-                              <InfiniteProgress
-                                status="error"
-                                className="mb-2"
-                              />
-                            )}
+
+                            <Progress
+                              value={progress}
+                              max={100}
+                              className="mb-2"
+                            />
                           </div>
                           <div className="flex gap-2 shrink-0">
                             {isError && dropzone.canRetry(file.id) && (

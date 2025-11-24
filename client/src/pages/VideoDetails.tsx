@@ -3,6 +3,7 @@
 import {
   Activity,
   cache,
+  startTransition,
   Suspense,
   use,
   useEffect,
@@ -107,19 +108,23 @@ function VideoProgress({ video: loadedVideo }: { video: Video }) {
       try {
         const payload = JSON.parse(event.data) as ProcessingProgress;
         // setVideoProgress(payload);
-        setVideo((prev) =>
-          prev && prev.id === payload.video_id
-            ? { ...prev, status: payload.status }
-            : prev
-        );
+        startTransition(() => {
+          setVideo((prev) =>
+            prev && prev.id === payload.video_id
+              ? { ...prev, status: payload.status }
+              : prev
+          );
+        });
         switch (payload.status) {
           case "waiting":
           case "started":
             break;
           case "processing":
             setProgress(
-              ((payload?.processed_frames ?? 0) * 100) /
-                (payload?.total_frames ?? 1)
+              Math.round(
+                ((payload?.processed_frames ?? 0) * 100) /
+                  (payload?.total_frames ?? 1)
+              )
             );
             break;
           case "completed":
