@@ -204,15 +204,6 @@ func parseJob(values map[string]interface{}) (models.VideoJob, error) {
 	return job, nil
 }
 
-// GetPendingJobs returns the count of pending jobs
-func GetPendingJobs(ctx context.Context) (int64, error) {
-	pending, err := RedisClient.XPending(ctx, VideoJobsStream, ConsumerGroup).Result()
-	if err != nil {
-		return 0, err
-	}
-	return pending.Count, nil
-}
-
 func PublishProgress(progress models.ProcessingProgress) error {
 	ctx := context.Background()
 
