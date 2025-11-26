@@ -28,7 +28,7 @@ func InitDB() (*gorm.DB, error) {
 		connStr string
 	)
 	if instanceConnectionName != "" {
-		connStr = fmt.Sprintf("host=%s user=%s password=%s dbname=%s",
+		connStr = fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable",
 			instanceConnectionName, dbUser, dbPass, dbName)
 		conn = postgres.New(postgres.Config{
 			DriverName: "cloudsqlpostgres",
