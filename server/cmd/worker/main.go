@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,22 +15,20 @@ import (
 	"syscall"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
 	server_utils "github.com/devrayat000/video-process/utils"
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"google.golang.org/api/option"
 	"gorm.io/gorm"
 )
 
-// Configuration
+// GCS Configuration
 var (
-	s3Endpoint = server_utils.GetEnv("S3_ENDPOINT", "localhost:9000")
-	s3Access   = server_utils.GetEnv("S3_ACCESS_KEY", "minioadmin")
-	s3Secret   = server_utils.GetEnv("S3_SECRET_KEY", "minioadmin")
-	s3Bucket   = server_utils.GetEnv("S3_BUCKET", "videos")
+	gcsBucket         = server_utils.GetEnv("GCS_BUCKET_NAME", "videos")
+	gcsPublicEndpoint = server_utils.GetEnv("GCS_PUBLIC_ENDPOINT", "http://localhost:4443")
 )
 
 // Rendition defines a single video quality preset
@@ -54,18 +51,16 @@ func main() {
 		log.Fatal("Failed to initialize Redis:", err)
 	}
 
-	// 1. Connect to MinIO
-	minioClient, err := minio.New(s3Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(s3Access, s3Secret, ""),
-		Secure: false,
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 128,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	})
+	// 1. Connect to Google Cloud Storage
+	ctx := context.Background()
+	gcsClient, err := storage.NewClient(ctx,
+		option.WithEndpoint(gcsPublicEndpoint),
+		option.WithoutAuthentication(),
+	)
 	if err != nil {
-		log.Fatal("Failed to connect to MinIO:", err)
+		log.Fatal("Failed to connect to GCS:", err)
 	}
+	defer gcsClient.Close()
 
 	// 2. Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,7 +82,7 @@ func main() {
 		log.Printf(" [x] Received Job: id=%s source=%s", job.VideoID, job.S3Path)
 
 		// Process the video
-		err := processVideoStreaming(minioClient, gormDB, job)
+		err := processVideoStreaming(gcsClient, gormDB, job)
 		if err != nil {
 			log.Printf(" [!] Error processing %s: %v", job.VideoID, err)
 			return err
@@ -104,7 +99,7 @@ func main() {
 	log.Println("Worker stopped gracefully")
 }
 
-func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJob) error {
+func processVideoStreaming(gcsClient *storage.Client, gormDB *gorm.DB, job models.VideoJob) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 
@@ -112,7 +107,7 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 
 	video := &models.Video{
 		ID:     job.VideoID,
-		S3Path: job.S3Path,
+		S3Path: job.S3Path, // GCS source path
 	}
 
 	// Update status to processing
@@ -176,7 +171,7 @@ func processVideoStreaming(mc *minio.Client, gormDB *gorm.DB, job models.VideoJo
 	})
 
 	// Transcode all renditions in a single FFmpeg command
-	err = transcodeToHLSBatch(ctx, mc, gormDB, *video, renditions)
+	err = transcodeToHLSBatch(ctx, gcsClient, gormDB, *video, renditions)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to transcode video: %v", err)
 		gorm.G[models.Video](gormDB).Where("id = ?", job.VideoID).Updates(ctx, models.Video{
@@ -317,13 +312,15 @@ func getRenditionHeights(renditions []Rendition) []int {
 }
 
 // transcodeToHLSBatch transcodes all renditions in a single FFmpeg command
-func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB, video models.Video, renditions []Rendition) error {
+func transcodeToHLSBatch(ctx context.Context, gcsClient *storage.Client, gormDB *gorm.DB, video models.Video, renditions []Rendition) error {
 	// Create temporary directory for HLS output
 	tempDir := fmt.Sprintf("/tmp/%s", video.ID)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir) // Clean up after upload
+
+	bucket := gcsClient.Bucket(gcsBucket)
 
 	splitCount := len(renditions)
 
@@ -436,23 +433,23 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 		return fmt.Errorf("failed to open master playlist: %w", err)
 	}
 
-	masterFileInfo, err := masterFile.Stat()
-	if err != nil {
+	masterObj := bucket.Object(masterPlaylistKey)
+	masterWriter := masterObj.NewWriter(ctx)
+	masterWriter.ContentType = "application/vnd.apple.mpegurl"
+
+	if _, err := io.Copy(masterWriter, masterFile); err != nil {
 		masterFile.Close()
-		return fmt.Errorf("failed to stat master playlist: %w", err)
-	}
-
-	_, err = mc.PutObject(ctx, s3Bucket, masterPlaylistKey, masterFile, masterFileInfo.Size(), minio.PutObjectOptions{
-		ContentType: "application/vnd.apple.mpegurl",
-	})
-	masterFile.Close()
-
-	if err != nil {
+		masterWriter.Close()
 		return fmt.Errorf("failed to upload master playlist: %w", err)
 	}
+	masterFile.Close()
 
-	// Construct permanent S3 URL for master playlist
-	masterURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, masterPlaylistKey)
+	if err := masterWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close master playlist writer: %w", err)
+	}
+
+	// Construct permanent GCS URL for master playlist
+	masterURL := fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, gcsBucket, masterPlaylistKey)
 
 	// Update video record with master playlist info
 	gorm.G[models.Video](gormDB).Where("id = ?", video.ID).Updates(ctx, models.Video{
@@ -462,7 +459,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 
 	log.Printf(" [√] Master playlist uploaded: %s", masterPlaylistKey)
 
-	// -------- UPLOAD TO S3 --------
+	// -------- UPLOAD RENDITIONS TO GCS --------
 	for i, r := range renditions {
 		streamDir := fmt.Sprintf("%s/stream_%d", tempDir, i)
 		streamName := fmt.Sprintf("stream_%d", i) // Keep same structure as temp dir
@@ -484,17 +481,11 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 			}
 
 			filePath := fmt.Sprintf("%s/%s", streamDir, file.Name())
-			s3Key := fmt.Sprintf("%s/processed/%s/%s", video.ID, streamName, file.Name())
+			gcsKey := fmt.Sprintf("%s/processed/%s/%s", video.ID, streamName, file.Name())
 
 			fileHandle, err := os.Open(filePath)
 			if err != nil {
 				return fmt.Errorf("failed to open file %s: %w", file.Name(), err)
-			}
-
-			fileInfo, err := fileHandle.Stat()
-			if err != nil {
-				fileHandle.Close()
-				return fmt.Errorf("failed to stat file: %w", err)
 			}
 
 			contentType := "application/vnd.apple.mpegurl"
@@ -503,23 +494,30 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 				segmentCount++
 			}
 
-			uploadInfo, err := mc.PutObject(ctx, s3Bucket, s3Key, fileHandle, fileInfo.Size(), minio.PutObjectOptions{
-				ContentType: contentType,
-			})
+			obj := bucket.Object(gcsKey)
+			writer := obj.NewWriter(ctx)
+			writer.ContentType = contentType
+
+			written, err := io.Copy(writer, fileHandle)
 			fileHandle.Close()
 
 			if err != nil {
-				return fmt.Errorf("S3 upload error for %s: %w", file.Name(), err)
+				writer.Close()
+				return fmt.Errorf("GCS upload error for %s: %w", file.Name(), err)
 			}
 
-			totalSize += uploadInfo.Size
+			if err := writer.Close(); err != nil {
+				return fmt.Errorf("GCS writer close error for %s: %w", file.Name(), err)
+			}
+
+			totalSize += written
 		}
 
 		log.Printf(" [>] Uploaded %d segments for %s", segmentCount, resolutionName)
 
-		// Construct permanent S3 URL for playlist
-		playlistS3Key := fmt.Sprintf("%s/processed/%s/playlist.m3u8", video.ID, streamName)
-		playlistURL := fmt.Sprintf("http://%s/%s/%s", s3Endpoint, s3Bucket, playlistS3Key)
+		// Construct permanent GCS URL for playlist
+		playlistGCSKey := fmt.Sprintf("%s/processed/%s/playlist.m3u8", video.ID, streamName)
+		playlistURL := fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, gcsBucket, playlistGCSKey)
 
 		// Calculate bandwidth (convert kbps to bps)
 		bandwidth := r.Bitrate * 1000
@@ -529,7 +527,7 @@ func transcodeToHLSBatch(ctx context.Context, mc *minio.Client, gormDB *gorm.DB,
 			ID:            uuid.New(),
 			VideoID:       video.ID,
 			Resolution:    resolutionName,
-			PlaylistS3Key: playlistS3Key,
+			PlaylistS3Key: playlistGCSKey, // GCS object key (field name kept for DB compatibility)
 			PlaylistURL:   playlistURL,
 			SegmentCount:  segmentCount,
 			TotalSize:     totalSize,
