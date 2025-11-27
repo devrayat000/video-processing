@@ -1,144 +1,264 @@
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { Upload } from "@aws-sdk/lib-storage";
+import { API_BASE_URL } from "./utils";
 
-// Configure S3 client with environment variables
-const region = import.meta.env.VITE_AWS_REGION;
-const accessKeyId = import.meta.env.VITE_AWS_ACCESS_KEY_ID;
-const secretAccessKey = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY;
-const endpoint = import.meta.env.VITE_AWS_S3_ENDPOINT;
-const bucket = import.meta.env.VITE_AWS_S3_BUCKET;
+const gcsEndpoint =
+  import.meta.env.VITE_GCS_ENDPOINT || "https://storage.googleapis.com";
+const gcsBucketEnv = import.meta.env.VITE_GCS_BUCKET;
 
-const createS3Client = () => {
-  // If credentials are not provided, return a client that will fail gracefully
-  if (!region || !accessKeyId || !secretAccessKey) {
-    console.warn(
-      "AWS credentials not configured. Video playback may not work."
+const ensureGcsBucket = (): string => {
+  if (!gcsBucketEnv) {
+    throw new Error(
+      "GCS bucket not configured. Please set VITE_GCS_BUCKET in your .env file."
     );
   }
-
-  return new S3Client({
-    region: region || "us-east-1",
-    endpoint: endpoint,
-    forcePathStyle: true,
-    credentials:
-      accessKeyId && secretAccessKey
-        ? {
-            accessKeyId,
-            secretAccessKey,
-          }
-        : undefined,
-  });
+  return gcsBucketEnv;
 };
 
-export const s3Client = createS3Client();
+const encodeKeyForUrl = (key: string): string =>
+  key
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 
-/**
- * Parse an S3 URL (s3://bucket/key) into bucket and key components
- */
-export const parseS3Url = (s3Url: string): { bucket: string; key: string } => {
-  const match = s3Url.match(/^s3:\/\/([^/]+)\/(.+)$/);
-  if (!match) {
-    throw new Error("Invalid S3 URL format. Expected: s3://bucket/key");
+const DEFAULT_PART_SIZE = 5 * 1024 * 1024; // 5MB per part
+
+export const parseGcsUrl = (
+  gcsUrl: string
+): { bucket: string; key: string } => {
+  const gsMatch = gcsUrl.match(/^gs:\/\/([^/]+)\/(.+)$/);
+  if (gsMatch) {
+    return { bucket: gsMatch[1], key: gsMatch[2] };
   }
-  return { bucket: match[1], key: match[2] };
-};
 
-/**
- * Generate a presigned URL for an S3 object
- * @param s3Url - The S3 URL (s3://bucket/key format)
- * @param expiresIn - URL expiration time in seconds (default: 1 hour)
- * @returns A presigned URL that can be used to access the object
- */
-export const getPresignedUrl = async (
-  s3Url: string,
-  expiresIn: number = 3600
-): Promise<string> => {
-  try {
-    const { bucket, key } = parseS3Url(s3Url);
-    const command = new GetObjectCommand({ Bucket: bucket, Key: key });
-    const url = await getSignedUrl(s3Client, command, { expiresIn });
-    return url;
-  } catch (error) {
-    console.error("Failed to generate presigned URL:", error);
-    // In development, you might want to return the original URL
-    // In production, you should handle this error appropriately
-    throw error;
+  const httpMatch = gcsUrl.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+)$/);
+  if (httpMatch) {
+    return { bucket: httpMatch[1], key: httpMatch[2] };
   }
-};
 
-/**
- * Check if AWS credentials are configured
- */
-export const hasAwsCredentials = (): boolean => {
-  return !!(
-    import.meta.env.VITE_AWS_REGION &&
-    import.meta.env.VITE_AWS_ACCESS_KEY_ID &&
-    import.meta.env.VITE_AWS_SECRET_ACCESS_KEY
+  throw new Error(
+    "Invalid GCS URL format. Expected: gs://bucket/key or https://host/bucket/key"
   );
 };
 
-/**
- * Get the configured S3 bucket name from environment variables
- */
-export const getS3Bucket = (): string => {
-  if (!bucket) {
-    throw new Error(
-      "S3 bucket not configured. Please set VITE_AWS_S3_BUCKET in your .env file"
-    );
+export const parseS3Url = parseGcsUrl;
+
+export const getPresignedUrl = async (
+  gcsUrl: string,
+  expiresIn: number = 3600
+): Promise<string> => {
+  const { bucket, key } = parseGcsUrl(gcsUrl);
+  const params = new URLSearchParams({ bucket, key });
+  if (expiresIn) {
+    params.set("expires", expiresIn.toString());
   }
-  return bucket;
+
+  const response = await fetch(
+    `${API_BASE_URL}/upload/signed-url?${params.toString()}`
+  );
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to generate signed URL");
+  }
+
+  const data = await response.json();
+  if (!data.url) {
+    throw new Error("Signed URL response missing 'url' field");
+  }
+
+  return data.url;
 };
 
-/**
- * Upload a file to S3 using multipart upload
- * @param file - The file to upload
- * @param key - The S3 key (path) where the file will be stored
- * @param onProgress - Optional callback for upload progress (0-100)
- * @returns The S3 URL of the uploaded file
- */
+interface UploadState {
+  uploadUrl: string;
+  bytesUploaded: number;
+  file: File;
+  key: string;
+}
+
+const uploadStates = new Map<string, UploadState>();
+
+async function initResumableUpload(
+  bucket: string,
+  key: string,
+  contentType: string
+): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/upload/init`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      bucket,
+      key,
+      content_type: contentType,
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to initialize upload");
+  }
+
+  const data = await response.json();
+  if (!data.upload_url) {
+    throw new Error("Upload init response missing 'upload_url'");
+  }
+
+  return data.upload_url;
+}
+
+function uploadChunk(
+  uploadUrl: string,
+  file: File,
+  start: number,
+  end: number,
+  totalSize: number,
+  onProgress?: (loaded: number, total: number) => void
+): Promise<{ bytesUploaded: number; complete: boolean }> {
+  return new Promise((resolve, reject) => {
+    const chunk = file.slice(start, end);
+    const xhr = new XMLHttpRequest();
+
+    xhr.open("PUT", uploadUrl, true);
+    xhr.setRequestHeader(
+      "Content-Type",
+      file.type || "application/octet-stream"
+    );
+    xhr.setRequestHeader(
+      "Content-Range",
+      `bytes ${start}-${end - 1}/${totalSize}`
+    );
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(start + event.loaded, totalSize);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200 || xhr.status === 201) {
+        resolve({ bytesUploaded: totalSize, complete: true });
+      } else if (xhr.status === 308) {
+        const range = xhr.getResponseHeader("Range");
+        if (range) {
+          const match = range.match(/bytes=0-(\d+)/);
+          const bytesUploaded = match ? parseInt(match[1], 10) + 1 : end;
+          resolve({ bytesUploaded, complete: false });
+        } else {
+          resolve({ bytesUploaded: end, complete: false });
+        }
+      } else {
+        reject(
+          new Error(`Chunk upload failed: ${xhr.status} ${xhr.statusText}`)
+        );
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Network error during chunk upload"));
+    xhr.ontimeout = () => reject(new Error("Upload timeout"));
+    xhr.timeout = 60000;
+
+    xhr.send(chunk);
+  });
+}
+
+async function queryUploadStatus(
+  uploadUrl: string,
+  totalSize: number
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl, true);
+    xhr.setRequestHeader("Content-Range", `bytes */${totalSize}`);
+
+    xhr.onload = () => {
+      if (xhr.status === 200 || xhr.status === 201) {
+        resolve(totalSize);
+      } else if (xhr.status === 308) {
+        const range = xhr.getResponseHeader("Range");
+        if (range) {
+          const match = range.match(/bytes=0-(\d+)/);
+          resolve(match ? parseInt(match[1], 10) + 1 : 0);
+        } else {
+          resolve(0);
+        }
+      } else {
+        reject(new Error(`Failed to query upload status: ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () =>
+      reject(new Error("Network error querying upload status"));
+    xhr.send();
+  });
+}
+
 export const uploadFileToS3 = async (
   file: File,
   key: string,
   onProgress?: (progress: number) => void
 ): Promise<string> => {
-  if (!hasAwsCredentials()) {
-    throw new Error(
-      "AWS credentials not configured. Please set up your .env file."
-    );
-  }
+  const bucket = ensureGcsBucket();
+  const fileSize = file.size;
+  const stateKey = `${bucket}/${key}`;
 
-  const bucket = getS3Bucket();
+  let state = uploadStates.get(stateKey);
+  let uploadUrl = state?.uploadUrl ?? "";
+  let bytesUploaded = 0;
 
-  try {
-    const upload = new Upload({
-      client: s3Client,
-      params: {
-        Bucket: bucket,
-        Key: key,
-        Body: file,
-        ContentType: file.type,
-      },
-      // Multipart upload configuration
-      queueSize: 4, // Number of concurrent uploads
-      partSize: 5 * 1024 * 1024, // 5MB per part (minimum allowed by S3)
-      leavePartsOnError: false, // Clean up on error
-    });
-
-    // Track upload progress
-    upload.on("httpUploadProgress", (progress) => {
-      if (onProgress && progress.loaded && progress.total) {
-        const percentage = Math.round((progress.loaded / progress.total) * 100);
-        onProgress(percentage);
+  if (state && state.file === file) {
+    uploadUrl = state.uploadUrl;
+    try {
+      bytesUploaded = await queryUploadStatus(uploadUrl, fileSize);
+      if (bytesUploaded >= fileSize) {
+        uploadStates.delete(stateKey);
+        return `${gcsEndpoint}/${bucket}/${encodeKeyForUrl(key)}`;
       }
-    });
-
-    await upload.done();
-
-    // Return the S3 URL
-    return `${endpoint}/${bucket}/${key}`;
-  } catch (error) {
-    console.error("Failed to upload file to S3:", error);
-    throw error;
+    } catch {
+      state = undefined;
+    }
   }
+
+  if (!state) {
+    uploadUrl = await initResumableUpload(
+      bucket,
+      key,
+      file.type || "application/octet-stream"
+    );
+    state = { uploadUrl, bytesUploaded: 0, file, key };
+    uploadStates.set(stateKey, state);
+  }
+
+  const partSize = DEFAULT_PART_SIZE;
+  let currentByte = bytesUploaded;
+
+  while (currentByte < fileSize) {
+    const end = Math.min(currentByte + partSize, fileSize);
+    const result = await uploadChunk(
+      uploadUrl,
+      file,
+      currentByte,
+      end,
+      fileSize,
+      (loaded, total) => {
+        if (onProgress) {
+          const percentage = Math.round((loaded / total) * 100);
+          onProgress(percentage);
+        }
+      }
+    );
+
+    if (result.complete) {
+      break;
+    }
+
+    currentByte = result.bytesUploaded;
+    if (state) {
+      state.bytesUploaded = currentByte;
+    }
+  }
+
+  uploadStates.delete(stateKey);
+
+  return `${gcsEndpoint}/${bucket}/${encodeKeyForUrl(key)}`;
 };
+
+export const uploadFileToGcs = uploadFileToS3;

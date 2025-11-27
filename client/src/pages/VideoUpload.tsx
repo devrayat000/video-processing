@@ -14,7 +14,7 @@ import {
   DropzoneTrigger,
   useDropzone,
 } from "@/components/ui/dropzone";
-import { uploadFileToS3 } from "@/lib/s3";
+import { uploadFileToS3 } from "@/lib/upload";
 import type { VideoJob } from "@/types/video";
 import { API_BASE_URL } from "@/lib/utils";
 import { Progress } from "@/components/ui/progress";
