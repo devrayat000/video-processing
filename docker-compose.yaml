@@ -6,6 +6,8 @@ services:
     pull_policy: build
     command: /app/api
     restart: unless-stopped
+    expose:
+      - "8080"
     ports:
       - "8080:8080"
     environment:
@@ -20,6 +22,8 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: videos
       S3_USE_SSL: false
+      STORAGE_EMULATOR_HOST: gcs:4443 # Hostname of the service below
+      GCS_BUCKET_NAME: videos
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 10s
@@ -31,6 +35,8 @@ services:
       redis:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      gcs:
         condition: service_healthy
     networks:
       - video-net

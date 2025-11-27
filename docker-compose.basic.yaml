@@ -36,45 +36,8 @@ services:
       timeout: 5s
       retries: 5
 
-  # 3. Object Storage (S3 Compatible)
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    restart: unless-stopped
-    ports:
-      - "9000:9000" # API port
-      - "9001:9001" # Console UI
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio_data:/data
-    networks:
-      - video-net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # 4. Setup Service (Optional helper to create the default bucket automatically)
-  minio-create-bucket:
-    image: minio/mc
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set myminio http://host.docker.internal:9000 minioadmin minioadmin;
-      /usr/bin/mc mb myminio/videos;
-      /usr/bin/mc anonymous set download myminio/videos;
-      exit 0;
-      "
-    networks:
-      - video-net
-
 volumes:
   postgres_data:
-  minio_data:
   redis_data:
 
 networks:
