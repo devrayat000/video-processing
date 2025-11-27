@@ -8,7 +8,7 @@ A YouTube-like transcoding pipeline with multi-resolution FFmpeg processing, Red
 - 🚀 **Live telemetry** – Server-Sent Events stream job progress with per-resolution detail.
 - 🧵 **Redis Streams queue** – Durable `video:jobs` stream + consumer groups replace RabbitMQ.
 - 💾 **Persistent metadata** – PostgreSQL stores source files, renditions, and status history.
-- ☁️ **S3-compatible storage** – MinIO buckets for originals (`videos/source`) and processed outputs (`videos/processed`).
+- ☁️ **Google Cloud Storage** – A single GCS bucket stores originals (`source/`) and processed outputs (`processed/`).
 - 🖥️ **Operator console** – React/Vite UI to submit jobs, inspect metadata, and watch timelines.
 
 ## Architecture
@@ -31,7 +31,7 @@ A YouTube-like transcoding pipeline with multi-resolution FFmpeg processing, Red
         │                    │ (Go)      │ │ uploads
         │                    └─────┬─────┘ │
         │                          │       ▼
-        │                        Updates  MinIO
+        │                        Updates  GCS
         │                          │       ▲
         │                          ▼       │
         │                      PostgreSQL  │
@@ -47,7 +47,7 @@ See `ARCHITECTURE.md` for the in-depth design, Redis stream names, and scaling n
 - **Worker (`server/cmd/worker`)** – Consumes Redis Streams jobs, orchestrates FFmpeg + uploads, persists renditions.
 - **Redis 7** – Provides `video:jobs` stream, consumer group `video-workers`, progress pub/sub, and caching.
 - **PostgreSQL 15** – Stores `videos` and `resolutions` tables. Exposed on host `localhost:5555` via `docker-compose.basic.yaml`.
-- **MinIO** – S3-compatible object storage on `localhost:9000` (console on `9001`).
+- **Google Cloud Storage** – Dedicated bucket for originals and renditions. Configure service-account credentials via `GOOGLE_APPLICATION_CREDENTIALS`.
 - **React client (`client`)** – Vite app for operators (dev server on `5173`).
 
 ## Local Development
@@ -58,6 +58,7 @@ See `ARCHITECTURE.md` for the in-depth design, Redis stream names, and scaling n
 - Go 1.22+ (for running API/worker outside Docker)
 - Node.js 18+ (for the React client)
 - FFmpeg + ffprobe installed locally and on `PATH`
+- Google Cloud project + service account with `storage.objects.{create,get}` and `iam.serviceAccounts.signBlob` permissions (store its JSON key locally or rely on ADC)
 - Optional: `docker network create devcontainer_default` (only if the external network referenced in compose files does not exist yet)
 
 ### Option A – Compose Everything (recommended)
@@ -68,13 +69,14 @@ See `ARCHITECTURE.md` for the in-depth design, Redis stream names, and scaling n
    docker compose -f docker-compose.basic.yaml -f docker-compose.yaml up -d --build
    ```
 
-2. Confirm the stack:
-   - API health: `curl http://localhost:8080/healthz`
-   - Redis CLI: `redis-cli -h localhost -p 6379 PING`
-   - MinIO console: `http://localhost:9001` (`minioadmin/minioadmin`)
-   - PostgreSQL: `psql postgresql://user:password@localhost:5555/videodb`
+1. Confirm the stack:
 
-3. When finished, stop everything:
+- API health: `curl http://localhost:8080/healthz`
+- Redis CLI: `redis-cli -h localhost -p 6379 PING`
+- PostgreSQL: `psql postgresql://user:password@localhost:5555/videodb`
+- GCS: `gsutil ls gs://$GCS_BUCKET_NAME` (requires `gcloud` auth)
+
+1. When finished, stop everything:
 
    ```bash
    docker compose -f docker-compose.basic.yaml -f docker-compose.yaml down
@@ -82,7 +84,7 @@ See `ARCHITECTURE.md` for the in-depth design, Redis stream names, and scaling n
 
 ### Option B – Manual API/Worker, Dockerized Infra
 
-1. Launch infra only (Postgres, Redis, MinIO, helper bucket seeder):
+1. Launch infra only (Postgres, Redis):
 
    ```bash
    docker compose -f docker-compose.basic.yaml up -d
@@ -122,7 +124,7 @@ Submit a video for processing.
 ```json
 {
   "video_id": "unique-video-id",
-  "s3_path": "http://minio:9000/videos/source/video.mp4",
+  "s3_path": "https://storage.googleapis.com/your-bucket/source/video.mp4",
   "original_filename": "my-video.mp4",
   "bucket": "videos"
 }
@@ -170,7 +172,7 @@ curl -X POST http://localhost:8080/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "video_id": "test-video-123",
-    "s3_path": "http://minio:9000/videos/source/test.mp4",
+    "s3_path": "https://storage.googleapis.com/your-bucket/source/test.mp4",
     "original_filename": "test.mp4",
     "bucket": "videos"
   }'
@@ -185,15 +187,10 @@ curl -N http://localhost:8080/progress/test-video-123
 
 - `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` – PostgreSQL connection (defaults: `postgres`, `5432`, etc.). When using the compose files, connect to `postgres:5432` inside Docker or `localhost:5555` from the host.
 - `REDIS_ADDR` – Redis host:port (e.g., `redis:6379` in Docker, `localhost:6379` locally).
-- `REDIS_PROGRESS_CHANNEL` (optional) – Override pub/sub channel for SSE fan-out.
-- `REDIS_JOBS_STREAM` (optional) – Override the Redis Stream name (defaults to `video:jobs`).
-
-### Worker-only
-
-- `S3_ENDPOINT` – MinIO / S3 endpoint (e.g., `minio:9000` in Docker, `http://localhost:9000` locally).
-- `S3_ACCESS_KEY`, `S3_SECRET_KEY` – Credentials (`minioadmin/minioadmin` by default).
-- `S3_BUCKET` – Bucket used for processed outputs (`videos`).
-- `S3_USE_SSL` – `false` for local MinIO, `true` for real S3 endpoints.
+- `REDIS_PROGRESS_CHANNEL` / `REDIS_JOBS_STREAM` (optional) – Override the Redis pub/sub + stream names (defaults: `video:progress:*`, `video:jobs`).
+- `GCS_BUCKET_NAME` – Target Google Cloud Storage bucket (required).
+- `GCS_PUBLIC_ENDPOINT` – Base URL for serving playlists (defaults to `https://storage.googleapis.com`).
+- `GOOGLE_APPLICATION_CREDENTIALS` – Path to the service-account JSON with `storage.objects.{get,create}` and `iam.serviceAccounts.signBlob` rights. When running locally, point to `~/.config/gcloud/application_default_credentials.json` or mount a key file into the container.
 
 ### Client (Vite)
 
@@ -201,11 +198,8 @@ Defined in `client/.env` or `.env.local`:
 
 ```bash
 VITE_API_BASE_URL=http://localhost:8080
-VITE_AWS_REGION=us-east-1
-VITE_AWS_ACCESS_KEY_ID=minioadmin
-VITE_AWS_SECRET_ACCESS_KEY=minioadmin
-VITE_AWS_S3_ENDPOINT=http://localhost:9000
-VITE_AWS_S3_BUCKET=videos
+VITE_GCS_ENDPOINT=https://storage.googleapis.com
+VITE_GCS_BUCKET=videos
 ```
 
 ## Frontend Integration
@@ -219,7 +213,7 @@ const submitVideo = async (videoFile) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       video_id: crypto.randomUUID(),
-      s3_path: "http://minio:9000/videos/source/" + videoFile.name,
+      s3_path: `https://storage.googleapis.com/${import.meta.env.VITE_GCS_BUCKET}/source/${videoFile.name}`,
       original_filename: videoFile.name,
       bucket: "videos",
     }),
