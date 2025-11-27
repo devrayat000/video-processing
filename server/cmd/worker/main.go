@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,14 +22,14 @@ import (
 	"github.com/devrayat000/video-process/pubsub"
 	server_utils "github.com/devrayat000/video-process/utils"
 	"github.com/google/uuid"
-	"google.golang.org/api/option"
 	"gorm.io/gorm"
 )
 
-// GCS Configuration
+// GCS configuration is resolved during startup via utils.InitStorage.
+// GCS configuration is resolved at runtime to keep API and worker consistent.
 var (
-	gcsBucket         = server_utils.GetEnv("GCS_BUCKET_NAME", "videos")
-	gcsPublicEndpoint = server_utils.GetEnv("GCS_PUBLIC_ENDPOINT", "http://localhost:4443")
+	gcsPublicEndpoint = server_utils.GetEnv("GCS_PUBLIC_ENDPOINT", "https://storage.googleapis.com")
+	gcsBucket         = server_utils.GetEnv("GCS_BUCKET_NAME", "")
 )
 
 // Rendition defines a single video quality preset
@@ -46,25 +47,22 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to initialize database:", err)
 	}
-
-	if err := pubsub.InitRedis(); err != nil {
+	redis, err := pubsub.InitRedis()
+	if err != nil {
 		log.Fatal("Failed to initialize Redis:", err)
 	}
+	defer redis.Close()
 
 	// 1. Connect to Google Cloud Storage
-	ctx := context.Background()
-	gcsClient, err := storage.NewClient(ctx,
-		option.WithEndpoint(gcsPublicEndpoint),
-		option.WithoutAuthentication(),
-	)
-	if err != nil {
-		log.Fatal("Failed to connect to GCS:", err)
-	}
-	defer gcsClient.Close()
-
 	// 2. Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	gcsClient, err := server_utils.InitStorage(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer gcsClient.Close()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -449,7 +447,7 @@ func transcodeToHLSBatch(ctx context.Context, gcsClient *storage.Client, gormDB 
 	}
 
 	// Construct permanent GCS URL for master playlist
-	masterURL := fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, gcsBucket, masterPlaylistKey)
+	masterURL := buildPublicURL(masterPlaylistKey)
 
 	// Update video record with master playlist info
 	gorm.G[models.Video](gormDB).Where("id = ?", video.ID).Updates(ctx, models.Video{
@@ -517,7 +515,7 @@ func transcodeToHLSBatch(ctx context.Context, gcsClient *storage.Client, gormDB 
 
 		// Construct permanent GCS URL for playlist
 		playlistGCSKey := fmt.Sprintf("%s/processed/%s/playlist.m3u8", video.ID, streamName)
-		playlistURL := fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, gcsBucket, playlistGCSKey)
+		playlistURL := buildPublicURL(playlistGCSKey)
 
 		// Calculate bandwidth (convert kbps to bps)
 		bandwidth := r.Bitrate * 1000
@@ -607,4 +605,13 @@ func monitorFFmpegProgressBatch(stderr io.ReadCloser) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func buildPublicURL(key string) string {
+	parts := strings.Split(key, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	escapedKey := strings.Join(parts, "/")
+	return fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, gcsBucket, escapedKey)
 }

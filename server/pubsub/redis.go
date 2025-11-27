@@ -28,7 +28,7 @@ var (
 	ConsumerName = server_utils.GetEnv("HOSTNAME", "worker-1")
 )
 
-func InitRedis() error {
+func InitRedis() (*redis.Client, error) {
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
 		Password: redisPass,
@@ -37,7 +37,7 @@ func InitRedis() error {
 
 	ctx := context.Background()
 	if err := RedisClient.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("failed to connect to Redis: %w", err)
+		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
 	log.Println("Redis connection established")
@@ -48,7 +48,7 @@ func InitRedis() error {
 		log.Printf("Warning: Failed to create consumer group: %v", err)
 	}
 
-	return nil
+	return RedisClient, nil
 }
 
 // EnqueueJob adds a video processing job to the Redis stream

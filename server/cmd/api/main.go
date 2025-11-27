@@ -1,17 +1,29 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/devrayat000/video-process/db"
 	"github.com/devrayat000/video-process/models"
 	"github.com/devrayat000/video-process/pubsub"
+	server_utils "github.com/devrayat000/video-process/utils"
 	"gorm.io/gorm"
+)
+
+// GCS configuration is resolved at runtime to keep API and worker consistent.
+var (
+	gcsPublicEndpoint = server_utils.GetEnv("GCS_PUBLIC_ENDPOINT", "https://storage.googleapis.com")
+	gcsBucket         = server_utils.GetEnv("GCS_BUCKET_NAME", "")
 )
 
 func main() {
@@ -21,9 +33,19 @@ func main() {
 		log.Fatal("Failed to initialize database:", err)
 	}
 
-	if err := pubsub.InitRedis(); err != nil {
+	redis, err := pubsub.InitRedis()
+	if err != nil {
 		log.Fatal("Failed to initialize Redis:", err)
 	}
+	defer redis.Close()
+
+	// Initialize GCS client (uses ADC / service account credentials)
+	ctx := context.Background()
+	gcsClient, err := server_utils.InitStorage(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer gcsClient.Close()
 
 	// HTTP Handlers
 	http.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +266,184 @@ func main() {
 		}
 	})
 
+	// Initialize resumable upload to GCS
+	http.HandleFunc("/upload/init", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Bucket      string `json:"bucket"`
+			Key         string `json:"key"`
+			ContentType string `json:"content_type"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if req.Key == "" {
+			http.Error(w, "Key is required", http.StatusBadRequest)
+			return
+		}
+
+		// Use default bucket if not provided
+		bucket := req.Bucket
+		if bucket == "" {
+			bucket = gcsBucket
+		}
+
+		contentType := req.ContentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+
+		// Generate signed URL for resumable upload
+		opts := &storage.SignedURLOptions{
+			Scheme:      storage.SigningSchemeV4,
+			Method:      "PUT",
+			Expires:     time.Now().Add(24 * time.Hour),
+			ContentType: contentType,
+			Headers: []string{
+				"x-goog-resumable:start",
+			},
+		}
+
+		signedURL, err := gcsClient.Bucket(bucket).SignedURL(req.Key, opts)
+		if err != nil {
+			log.Printf("Failed to create upload signed URL: %v", err)
+			http.Error(w, "Failed to create upload URL", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"upload_url": signedURL,
+			"bucket":     bucket,
+			"key":        req.Key,
+			"method":     "signed",
+		})
+	})
+
+	// Direct upload endpoint (proxy to GCS for CORS support)
+	http.HandleFunc("/upload/direct", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method != "POST" && r.Method != "PUT" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "Key query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		bucket := r.URL.Query().Get("bucket")
+		if bucket == "" {
+			bucket = gcsBucket
+		}
+
+		contentType := r.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+
+		// Upload to GCS
+		ctx := r.Context()
+		obj := gcsClient.Bucket(bucket).Object(key)
+		writer := obj.NewWriter(ctx)
+		writer.ContentType = contentType
+
+		_, err := io.Copy(writer, r.Body)
+		if err != nil {
+			writer.Close()
+			log.Printf("Failed to upload to GCS: %v", err)
+			http.Error(w, "Upload failed", http.StatusInternalServerError)
+			return
+		}
+
+		if err := writer.Close(); err != nil {
+			log.Printf("Failed to close GCS writer: %v", err)
+			http.Error(w, "Upload failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Return the public URL
+		publicURL := fmt.Sprintf("%s/%s/%s", gcsPublicEndpoint, bucket, encodeKeyForURL(key))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"url":    publicURL,
+			"bucket": bucket,
+			"key":    key,
+		})
+	})
+
+	// Generate signed URL for downloading
+	http.HandleFunc("/upload/signed-url", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "Key query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		bucket := r.URL.Query().Get("bucket")
+		if bucket == "" {
+			bucket = gcsBucket
+		}
+
+		expiresIn := 3600 // 1 hour default
+		if expiresStr := r.URL.Query().Get("expires"); expiresStr != "" {
+			if e, err := strconv.Atoi(expiresStr); err == nil {
+				expiresIn = e
+			}
+		}
+
+		opts := &storage.SignedURLOptions{
+			Scheme:  storage.SigningSchemeV4,
+			Method:  "GET",
+			Expires: time.Now().Add(time.Duration(expiresIn) * time.Second),
+		}
+
+		signedURL, err := gcsClient.Bucket(bucket).SignedURL(key, opts)
+		if err != nil {
+			log.Printf("Failed to create download signed URL: %v", err)
+			http.Error(w, "Failed to create download URL", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"url":    signedURL,
+			"method": "signed",
+		})
+	})
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		enableCors(&w)
 
@@ -268,4 +468,12 @@ func enableCors(w *http.ResponseWriter) {
 	(*w).Header().Set("Access-Control-Allow-Origin", "*")
 	(*w).Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 	(*w).Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+}
+
+func encodeKeyForURL(key string) string {
+	parts := strings.Split(key, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
