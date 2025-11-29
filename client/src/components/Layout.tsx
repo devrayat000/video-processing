@@ -1,17 +1,15 @@
-import { Link, Outlet, useLocation } from "react-router";
-import { Button } from "@/components/ui/button";
+import { Link, Outlet, NavLink } from "react-router";
+import { buttonVariants } from "@/components/ui/button";
 import { Fragment } from "react/jsx-runtime";
 import { Toaster } from "./ui/sonner";
 
+const navItems = [
+  { path: "/", label: "Dashboard" },
+  { path: "/upload", label: "Upload" },
+  { path: "/videos", label: "Videos" },
+];
+
 export default function Layout() {
-  const location = useLocation();
-
-  const navItems = [
-    { path: "/", label: "Dashboard" },
-    { path: "/upload", label: "Upload" },
-    { path: "/videos", label: "Videos" },
-  ];
-
   return (
     <Fragment>
       <div className="min-h-screen">
@@ -22,16 +20,18 @@ export default function Layout() {
             </Link>
             <div className="flex gap-2">
               {navItems.map((item) => (
-                <Button
+                <NavLink
                   key={item.path}
-                  asChild
-                  variant={
-                    location.pathname === item.path ? "default" : "ghost"
+                  className={(props) =>
+                    buttonVariants({
+                      variant: props.isActive ? "default" : "ghost",
+                      size: "sm",
+                    })
                   }
-                  size="sm"
+                  to={item.path}
                 >
-                  <Link to={item.path}>{item.label}</Link>
-                </Button>
+                  {item.label}
+                </NavLink>
               ))}
             </div>
           </div>
