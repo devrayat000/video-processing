@@ -1,0 +1,56 @@
+apiVersion: run.googleapis.com/v1
+kind: WorkerPool
+metadata:
+  annotations:
+    run.googleapis.com/invoker-iam-disabled: "true"
+    run.googleapis.com/launch-stage: BETA
+    run.googleapis.com/manualInstanceCount: "1"
+    run.googleapis.com/scalingMode: manual
+  labels:
+    cloud.googleapis.com/location: asia-southeast1
+    run.googleapis.com/satisfiesPzs: "true"
+  name: vp-worker
+  namespace: "319016052566"
+spec:
+  instanceSplits:
+    - latestRevision: true
+      percent: 100
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/vpc-access-egress: private-ranges-only
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cloudsql-instances: shosta-ai:asia-southeast1:videodb
+        run.googleapis.com/network-interfaces: '[{"network":"default","subnetwork":"default"}]'
+      labels:
+        client.knative.dev/nonce: 0303cbf4-0ca6-4a5c-9061-e6173420e384
+    spec:
+      containerConcurrency: 0
+      containers:
+        - command:
+            - /app/worker
+          env:
+            - name: INSTANCE_CONNECTION_NAME
+              value: shosta-ai:asia-southeast1:videodb
+            - name: DB_NAME
+              value: video_db
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: db-password
+            - name: REDIS_ADDR
+              value: 10.104.9.251:6379
+            - name: GCS_BUCKET_NAME
+              value: video_store_6969f
+          image: gcr.io/shosta-ai/vp-api
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      serviceAccountName: 319016052566-compute@developer.gserviceaccount.com
