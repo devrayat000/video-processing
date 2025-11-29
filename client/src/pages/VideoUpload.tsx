@@ -62,7 +62,7 @@ const submitJobToBackend = async (params: VideoJob): Promise<string> => {
   return result.id || params.id;
 };
 
-export default function VideoUpload() {
+export function Component() {
   const navigate = useNavigate();
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>(
     {}
@@ -248,3 +248,4 @@ export default function VideoUpload() {
     </main>
   );
 }
+Component.displayName = "VideoUpload";

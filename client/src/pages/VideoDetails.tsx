@@ -2,32 +2,46 @@
 
 import {
   Activity,
-  cache,
   startTransition,
   Suspense,
-  use,
   useEffect,
   useOptimistic,
   useState,
 } from "react";
-import { useParams } from "react-router";
+import {
+  useLoaderData,
+  useParams,
+  type LoaderFunctionArgs,
+  data,
+  Await,
+  useAsyncValue,
+} from "react-router";
 import { CustomVideoPlayer } from "@ntxmjs/react-custom-video-player";
 import { playerIcons, videoContainerStyles } from "@/lib/videoPlayerConfig";
 import { CircularProgress } from "@/components/custom-ui/circular-progress";
 import { API_BASE_URL } from "@/lib/utils";
 import type { ProcessingProgress, Video } from "@/types/video";
 
-const loadVideoDetails = cache(async (id: string) => {
-  const response = await fetch(`${API_BASE_URL}/videos/${id}`);
-  if (!response.ok) {
-    throw new Error("Unable to load video details");
+export async function loader({ params, request }: LoaderFunctionArgs) {
+  if (!params.videoId) {
+    throw data("No video ID provided", { status: 400 });
   }
-  const data: Video = await response.json();
-  return data;
-});
+  const response = await fetch(`${API_BASE_URL}/videos/${params.videoId}`, {
+    signal: request.signal,
+  });
+  if (!response.ok) {
+    throw data("Unable to load video details", { status: response.status });
+  }
 
-export default function VideoDetailsPage() {
+  const videoPromise: Promise<Video> = response.json();
+  return {
+    video: videoPromise,
+  };
+}
+
+export function Component() {
   const { videoId } = useParams<{ videoId: string }>();
+  const loaderData = useLoaderData<typeof loader>();
 
   if (!videoId) {
     return (
@@ -40,14 +54,17 @@ export default function VideoDetailsPage() {
   return (
     <main className="max-w-7xl mx-auto py-8 px-4">
       <Suspense>
-        <VideoDetails videoPromise={loadVideoDetails(videoId)} />
+        <Await resolve={loaderData.video}>
+          <VideoDetails />
+        </Await>
       </Suspense>
     </main>
   );
 }
+Component.displayName = "VideoDetailsPage";
 
-function VideoDetails({ videoPromise }: { videoPromise: Promise<Video> }) {
-  const video = use(videoPromise);
+function VideoDetails() {
+  const video = useAsyncValue() as Video;
   const isCompleted =
     video.status === "completed" &&
     !!video.master_playlist_url &&
