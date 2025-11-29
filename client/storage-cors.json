@@ -1,8 +1,8 @@
 [
     {
       "origin": ["https://vpaap.web.app"],
-      "method": ["GET"],
-      "responseHeader": ["Content-Type"],
+      "method": ["GET", "HEAD", "OPTIONS"],
+      "responseHeader": ["Content-Type", "Range"],
       "maxAgeSeconds": 3600
     }
 ]
