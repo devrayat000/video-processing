@@ -1,8 +1,17 @@
 import "@formatjs/intl-durationformat/polyfill";
 
-import { cache, Suspense, use } from "react";
+import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
-import { Link, useNavigate } from "react-router";
+import {
+  Await,
+  Link,
+  useAsyncValue,
+  useLoaderData,
+  type LoaderFunctionArgs,
+  useRevalidator,
+  useRouteError,
+  useAsyncError,
+} from "react-router";
 import { API_BASE_URL } from "@/lib/utils";
 import type { Video } from "@/types/video";
 import {
@@ -13,17 +22,22 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 
-const loadVideos = cache(async () => {
-  const response = await fetch(`${API_BASE_URL}/videos?limit=50`);
+export async function loader({ request }: LoaderFunctionArgs) {
+  const response = await fetch(`${API_BASE_URL}/videos?limit=50`, {
+    signal: request.signal,
+  });
   if (!response.ok) {
     throw new Error(`Unable to fetch videos (${response.status})`);
   }
-  const data: Video[] = await response.json();
-  return data;
-});
+  const data: Promise<Video[]> = response.json();
+  return {
+    videos: data,
+  };
+}
 
-export default function Dashboard() {
-  const navigate = useNavigate();
+export function Component() {
+  const revalidator = useRevalidator();
+  const loaderData = useLoaderData<typeof loader>();
 
   return (
     <main className="app-shell">
@@ -34,7 +48,7 @@ export default function Dashboard() {
               type="button"
               variant="outline"
               size="default"
-              onClick={() => navigate(0)}
+              onClick={() => revalidator.revalidate()}
               // disabled={loadingList}
             >
               Refresh
@@ -44,16 +58,30 @@ export default function Dashboard() {
           {/* {listError && <p className="error">{listError}</p>} */}
 
           <Suspense fallback={<div className="p-4">Loading videos...</div>}>
-            <VideoList videosPromise={loadVideos()} />
+            <Await resolve={loaderData.videos} errorElement={<VideoError />}>
+              <VideoList />
+            </Await>
           </Suspense>
         </div>
       </section>
     </main>
   );
 }
+Component.displayName = "DashboardPage";
 
-function VideoList({ videosPromise }: { videosPromise: Promise<Video[]> }) {
-  const videos = use(videosPromise);
+function VideoError() {
+  const error = useAsyncError();
+
+  return (
+    <div className="p-4 text-red-600">
+      <p>Sorry, an unexpected error has occurred.</p>
+      <pre className="whitespace-pre-wrap">{String(error)}</pre>
+    </div>
+  );
+}
+
+function VideoList() {
+  const videos = useAsyncValue() as Video[];
 
   if (videos.length === 0) {
     return <p className="p-4">No videos found.</p>;
@@ -93,5 +121,25 @@ function VideoItem({ video }: { video: Video }) {
         </ItemContent>
       </Link>
     </Item>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  return (
+    <div className="app-shell">
+      <section className="grid">
+        <div className="panel list-panel">
+          <div className="panel-header my-5 flex items-center justify-center">
+            <h2 className="text-lg font-semibold">Error</h2>
+          </div>
+          <div className="p-4 text-red-600">
+            <p>Sorry, an unexpected error has occurred.</p>
+            <pre className="whitespace-pre-wrap">{String(error)}</pre>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }

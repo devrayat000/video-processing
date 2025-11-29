@@ -1,23 +1,24 @@
-import { BrowserRouter, Route, Routes } from "react-router";
-import Dashboard from "./pages/Dashboard";
+import {
+  Route,
+  createBrowserRouter,
+  RouterProvider,
+  createRoutesFromElements,
+} from "react-router";
 import Layout from "./components/Layout";
-import VideoUpload from "./pages/VideoUpload";
-import VideoList from "./pages/VideoList";
-import VideoDetails from "./pages/VideoDetails";
+
+const routes = createBrowserRouter(
+  createRoutesFromElements(
+    <Route path="/" element={<Layout />}>
+      <Route index lazy={() => import("./pages/Dashboard")} id="root" />
+      <Route path="videos">
+        <Route index lazy={() => import("./pages/VideoList")} />
+        <Route path=":videoId" lazy={() => import("./pages/VideoDetails")} />
+      </Route>
+      <Route path="upload" lazy={() => import("./pages/VideoUpload")} />
+    </Route>
+  )
+);
 
 export default function App() {
-  return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/*" element={<Layout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="upload" element={<VideoUpload />} />
-          <Route path="videos">
-            <Route index element={<VideoList />} />
-            <Route path=":videoId" element={<VideoDetails />} />
-          </Route>
-        </Route>
-      </Routes>
-    </BrowserRouter>
-  );
+  return <RouterProvider router={routes} />;
 }

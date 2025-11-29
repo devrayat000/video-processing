@@ -1,6 +1,6 @@
 "use client";
 
-import { cache, startTransition, Suspense, use } from "react";
+import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -10,8 +10,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useNavigate } from "react-router";
-import { API_BASE_URL } from "@/lib/utils";
+import {
+  Await,
+  useAsyncValue,
+  useNavigate,
+  useRevalidator,
+  useRouteLoaderData,
+} from "react-router";
+import { loader as rootLoader } from "./Dashboard";
 
 type VideoStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -75,18 +81,9 @@ const formatDateTime = (value?: string) => {
   return dt.toLocaleString();
 };
 
-const loadVideos = cache(async () => {
-  const response = await fetch(`${API_BASE_URL}/videos?limit=50`);
-  if (!response.ok) {
-    throw new Error(`Unable to fetch videos (${response.status})`);
-  }
-  const data: Video[] = await response.json();
-  return data;
-});
-
-export default function VideoListPage() {
-  const navigate = useNavigate();
-  const videosPromise = loadVideos();
+export function Component() {
+  const revalidator = useRevalidator();
+  const loaderData = useRouteLoaderData<typeof rootLoader>("root");
 
   return (
     <main className="max-w-7xl mx-auto py-8 px-4">
@@ -110,11 +107,7 @@ export default function VideoListPage() {
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => {
-              startTransition(() => {
-                navigate(0);
-              });
-            }}
+            onClick={() => revalidator.revalidate()}
             // disabled={loadingList}
           >
             Refresh
@@ -122,18 +115,21 @@ export default function VideoListPage() {
         </div>
 
         <Suspense fallback={<div className="skeleton">Loading jobs…</div>}>
-          <VideoList videosPromise={videosPromise} />
+          <Await resolve={loaderData?.videos}>
+            <VideoList />
+          </Await>
         </Suspense>
       </div>
     </main>
   );
 }
+Component.displayName = "VideoListPage";
 
-function VideoList({ videosPromise }: { videosPromise: Promise<Video[]> }) {
-  const videos = use(videosPromise);
+function VideoList() {
+  const videos = useAsyncValue() as Video[] | undefined;
   const navigate = useNavigate();
 
-  if (videos.length === 0) {
+  if (!videos || videos.length === 0) {
     return (
       <div className="empty-state">
         <p>No jobs yet.</p>
